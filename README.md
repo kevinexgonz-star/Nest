@@ -20,6 +20,6 @@ Gestión de stock con previsión de consumo y alertas
  
 Persistencia en localStorage
 🚀 Uso
-Abrir  index.html  directamente en Chrome. Requiere conexión a internet en la primera carga (CDN: React, pdf.js, Babel, ClipperLib).
+Abrir  rotula-nest-demo-12.html  directamente en Chrome. Requiere conexión a internet en la primera carga (CDN: React, pdf.js, Babel, ClipperLib).
 🛠️ Stack
 React 18 · pdf.js · ClipperLib · WASM (Minkowski/offset) · Babel (JSX en navegador)
