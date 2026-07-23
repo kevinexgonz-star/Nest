@@ -8718,10 +8718,6 @@ const __NEST_CFG__ = {
   groupOrders: false // demo-6: opcion retirada; los pedidos se distinguen por color (v80), no por bandas
 };
 if (typeof window !== 'undefined') window.__NEST_CFG__ = __NEST_CFG__;
-/* demo-12: sistema de RETALES oculto "por ahora". Un solo interruptor lo apaga por completo:
-   no se carga de localStorage, no se guarda (no acumula memoria), no aparece la pestaña ni el
-   panel, y no se generan sobrantes. Poner en true para reactivarlo tal cual estaba. */
-const RETALES_ENABLED = false;
 function chooseNest() {
   return __NEST_CFG__.nfp && clipperOK() && typeof window !== 'undefined' && window.RotulaNFP ? nestPiecesNFP : nestPieces;
 }
@@ -10361,68 +10357,53 @@ function parseSVG(svgText, userScale) {
       }
     }
   });
-  // Agrupacion por contencion jerarquica: cada pieza = el contorno raiz + TODAS
-  // las capas de detalle (hendido, cajeado, taladros, grabado...) que quedan
-  // dentro de el. A diferencia del metodo anterior, los trazados compuestos
-  // (paths con varias subformas: texto vectorizado, contornos con agujeros...)
-  // tambien participan como contenedores/contenidos, de modo que una pieza con
-  // muchas capas NO se separa en varias piezas y conserva todas sus capas.
-  const boxes = [];
+  const boxes = [],
+    assigned = new Set();
+  const isCompound = el => {
+    if (!el.tagName || el.tagName.toLowerCase() !== "path") return false;
+    return ((el.getAttribute("d") || "").match(/[Mm]/g) || []).length > 1;
+  };
   const inside = (o, i) => o && i && i.x >= o.x - 1 && i.y >= o.y - 1 && i.x + i.w <= o.x + o.w + 1 && i.y + i.h <= o.y + o.h + 1;
-  const valid = [];
   allEls.forEach((item, idx) => {
-    if (item.bbox && item.bbox.w >= 0.5 && item.bbox.h >= 0.5) valid.push(idx);
-  });
-  const areaOf = idx => allEls[idx].bbox.w * allEls[idx].bbox.h;
-  // "a" envuelve a "b" si su area es mayor (o igual con indice menor, para
-  // desempatar contornos identicos superpuestos sin crear ciclos).
-  const wraps = (a, b) => {
-    const aa = areaOf(a),
-      ab = areaOf(b);
-    return aa > ab || aa === ab && a < b;
-  };
-  // padre de cada elemento = el elemento mas ajustado (menor area) que lo contiene
-  const parentOf = {};
-  valid.forEach(i => {
-    let best = -1;
-    valid.forEach(j => {
-      if (j === i || !wraps(j, i) || !inside(allEls[j].bbox, allEls[i].bbox)) return;
-      if (best === -1 || wraps(best, j)) best = j;
-    });
-    parentOf[i] = best;
-  });
-  const rootOf = i => {
-    let n = i,
-      guard = 0;
-    while (parentOf[n] >= 0 && guard++ < valid.length) n = parentOf[n];
-    return n;
-  };
-  const byRoot = new Map();
-  valid.forEach(i => {
-    const r = rootOf(i);
-    if (!byRoot.has(r)) byRoot.set(r, []);
-    byRoot.get(r).push(i);
-  });
-  for (const indices of byRoot.values()) {
-    let b = {
-      ...allEls[indices[0]].bbox
-    };
-    for (let k = 1; k < indices.length; k++) {
-      const nb = allEls[indices[k]].bbox;
-      const nx = Math.min(b.x, nb.x),
-        ny = Math.min(b.y, nb.y);
-      b = {
-        x: nx,
-        y: ny,
-        w: Math.max(b.x + b.w, nb.x + nb.w) - nx,
-        h: Math.max(b.y + b.h, nb.y + nb.h) - ny
-      };
+    if (!item.bbox || item.bbox.w < 0.5 || item.bbox.h < 0.5) {
+      assigned.add(idx);
+      return;
     }
-    boxes.push({
-      indices,
-      bbox: b
+    if (isCompound(item.el)) {
+      assigned.add(idx);
+      boxes.push({
+        indices: [idx],
+        bbox: {
+          ...item.bbox
+        }
+      });
+    }
+  });
+  allEls.forEach((oi, oIdx) => {
+    if (assigned.has(oIdx) || !oi.bbox || oi.bbox.w < 0.5) return;
+    const c = [];
+    allEls.forEach((ii, iIdx) => {
+      if (iIdx !== oIdx && !assigned.has(iIdx) && ii.bbox && inside(oi.bbox, ii.bbox)) c.push(iIdx);
     });
-  }
+    if (c.length) {
+      assigned.add(oIdx);
+      c.forEach(i => assigned.add(i));
+      boxes.push({
+        indices: [oIdx, ...c],
+        bbox: {
+          ...oi.bbox
+        }
+      });
+    }
+  });
+  allEls.forEach((item, idx) => {
+    if (!assigned.has(idx) && item.bbox && item.bbox.w >= 0.5 && item.bbox.h >= 0.5) boxes.push({
+      indices: [idx],
+      bbox: {
+        ...item.bbox
+      }
+    });
+  });
   document.body.removeChild(tmp);
   const pieces = boxes.map((g, i) => {
     const b = g.bbox;
@@ -15524,8 +15505,8 @@ function App() {
   const [progStart, setProgStart] = useState(null);
   const [batches, setBatches] = useState([]);
   const [activeBatchIdx, setActiveBatchIdx] = useState(0);
-  const [retales, setRetales] = useState(() => RETALES_ENABLED ? LS.get("np-retales-v1", []) : []);
-  const saveRetales = r => { if (!RETALES_ENABLED) return; setRetales(r); LS.set("np-retales-v1", r); };
+  const [retales, setRetales] = useState(() => LS.get("np-retales-v1", []));
+  const saveRetales = r => { setRetales(r); LS.set("np-retales-v1", r); };
   const [stock, setStock] = useState(() => LS.get("np-stock-v1", {}));
   const saveStock = s => { setStock(s); LS.set("np-stock-v1", s); };
   const [stockCfg, setStockCfg] = useState(() => LS.get("np-stock-cfg-v1", { buyerEmail: "" }));
@@ -16133,7 +16114,7 @@ function App() {
     const m = materials[selMat] || materials[0] || {};
     return m.thickness ? (m.thickness[selThk] !== undefined ? m.thickness[selThk] : m.thickness[0]) : null;
   };
-  const pendingLeftovers = (RETALES_ENABLED && nestResult) ? computeLeftovers(nestResult, plateW, plateH, (materials[selMat] || {}).name, _currentThk()) : [];
+  const pendingLeftovers = nestResult ? computeLeftovers(nestResult, plateW, plateH, (materials[selMat] || {}).name, _currentThk()) : [];
   const _edRetalOpts = retalesForMaterial(retales, (materials[selMat] || {}).name, _currentThk());
   const _edSurf = editorSurface !== "plate" ? _edRetalOpts.find(r => r.id === editorSurface) : null;
   const editorSurfaceVal = _edSurf ? editorSurface : "plate";
@@ -16192,7 +16173,7 @@ function App() {
     setShowSendMenu(false);
     let __n = 0;
     let __retConsumed = 0;
-    if (RETALES_ENABLED && _leftoversSavedRef.current !== nestResult) {
+    if (_leftoversSavedRef.current !== nestResult) {
       // Retales CONSUMIDOS: se decrementan los retales usados en el nesting (función pura testeada).
       const __cr = consumeUsedRetales(retales, nestResult);
       const __baseRetales = __cr.next;
@@ -16936,10 +16917,10 @@ function App() {
   }, {
     id: "materials",
     l: "📦 Materiales"
-  }, ...(RETALES_ENABLED ? [{
+  }, {
     id: "retales",
     l: "♻️ Retales"
-  }] : []), {
+  }, {
     id: "stock",
     l: (() => {
       const n = lowStockCount(materials, stock, history, Date.now());
@@ -18276,7 +18257,7 @@ function App() {
       color: "#888",
       border: "1px solid #eee"
     }
-  }, t, "mm")))))))), RETALES_ENABLED && tab === "retales" && React.createElement(RetalesPanel, {
+  }, t, "mm")))))))), tab === "retales" && React.createElement(RetalesPanel, {
     materials: materials,
     retales: retales,
     saveRetales: saveRetales,
@@ -19328,7 +19309,7 @@ function PasteBox({
 ReactDOM.render(React.createElement(App, null), document.getElementById("root"));
 </script>
 <script>
-/* === DEMO STANDALONE v12: Panel Fresa Nave A - Wolfcut (iframe) + motor Rotula Nest v90 ===
+/* === DEMO STANDALONE v11: Panel Fresa Nave A - Wolfcut (iframe) + motor Rotula Nest v90 ===
    v4: React/ReactDOM/ClipperLib embebidos (antes CDN) -> funciona sin internet.
    v5: barra LOTES POR MATERIAL con la paleta clara de la pagina de nesting (#fff/#f4f5f7/#E6007E) y mas grande.
    v6: lotes por material+GROSOR (Opal 8 / Opal 4 / PVC 19 / PVC 3); fuera "Agrupar pedidos" (los pedidos se
