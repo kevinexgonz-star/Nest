@@ -2075,53 +2075,68 @@ function parseSVG(svgText, userScale) {
       }
     }
   });
-  const boxes = [],
-    assigned = new Set();
-  const isCompound = el => {
-    if (!el.tagName || el.tagName.toLowerCase() !== "path") return false;
-    return ((el.getAttribute("d") || "").match(/[Mm]/g) || []).length > 1;
-  };
+  // Agrupacion por contencion jerarquica: cada pieza = el contorno raiz + TODAS
+  // las capas de detalle (hendido, cajeado, taladros, grabado...) que quedan
+  // dentro de el. A diferencia del metodo anterior, los trazados compuestos
+  // (paths con varias subformas: texto vectorizado, contornos con agujeros...)
+  // tambien participan como contenedores/contenidos, de modo que una pieza con
+  // muchas capas NO se separa en varias piezas y conserva todas sus capas.
+  const boxes = [];
   const inside = (o, i) => o && i && i.x >= o.x - 1 && i.y >= o.y - 1 && i.x + i.w <= o.x + o.w + 1 && i.y + i.h <= o.y + o.h + 1;
+  const valid = [];
   allEls.forEach((item, idx) => {
-    if (!item.bbox || item.bbox.w < 0.5 || item.bbox.h < 0.5) {
-      assigned.add(idx);
-      return;
-    }
-    if (isCompound(item.el)) {
-      assigned.add(idx);
-      boxes.push({
-        indices: [idx],
-        bbox: {
-          ...item.bbox
-        }
-      });
-    }
+    if (item.bbox && item.bbox.w >= 0.5 && item.bbox.h >= 0.5) valid.push(idx);
   });
-  allEls.forEach((oi, oIdx) => {
-    if (assigned.has(oIdx) || !oi.bbox || oi.bbox.w < 0.5) return;
-    const c = [];
-    allEls.forEach((ii, iIdx) => {
-      if (iIdx !== oIdx && !assigned.has(iIdx) && ii.bbox && inside(oi.bbox, ii.bbox)) c.push(iIdx);
+  const areaOf = idx => allEls[idx].bbox.w * allEls[idx].bbox.h;
+  // "a" envuelve a "b" si su area es mayor (o igual con indice menor, para
+  // desempatar contornos identicos superpuestos sin crear ciclos).
+  const wraps = (a, b) => {
+    const aa = areaOf(a),
+      ab = areaOf(b);
+    return aa > ab || aa === ab && a < b;
+  };
+  // padre de cada elemento = el elemento mas ajustado (menor area) que lo contiene
+  const parentOf = {};
+  valid.forEach(i => {
+    let best = -1;
+    valid.forEach(j => {
+      if (j === i || !wraps(j, i) || !inside(allEls[j].bbox, allEls[i].bbox)) return;
+      if (best === -1 || wraps(best, j)) best = j;
     });
-    if (c.length) {
-      assigned.add(oIdx);
-      c.forEach(i => assigned.add(i));
-      boxes.push({
-        indices: [oIdx, ...c],
-        bbox: {
-          ...oi.bbox
-        }
-      });
+    parentOf[i] = best;
+  });
+  const rootOf = i => {
+    let n = i,
+      guard = 0;
+    while (parentOf[n] >= 0 && guard++ < valid.length) n = parentOf[n];
+    return n;
+  };
+  const byRoot = new Map();
+  valid.forEach(i => {
+    const r = rootOf(i);
+    if (!byRoot.has(r)) byRoot.set(r, []);
+    byRoot.get(r).push(i);
+  });
+  for (const indices of byRoot.values()) {
+    let b = {
+      ...allEls[indices[0]].bbox
+    };
+    for (let k = 1; k < indices.length; k++) {
+      const nb = allEls[indices[k]].bbox;
+      const nx = Math.min(b.x, nb.x),
+        ny = Math.min(b.y, nb.y);
+      b = {
+        x: nx,
+        y: ny,
+        w: Math.max(b.x + b.w, nb.x + nb.w) - nx,
+        h: Math.max(b.y + b.h, nb.y + nb.h) - ny
+      };
     }
-  });
-  allEls.forEach((item, idx) => {
-    if (!assigned.has(idx) && item.bbox && item.bbox.w >= 0.5 && item.bbox.h >= 0.5) boxes.push({
-      indices: [idx],
-      bbox: {
-        ...item.bbox
-      }
+    boxes.push({
+      indices,
+      bbox: b
     });
-  });
+  }
   document.body.removeChild(tmp);
   const pieces = boxes.map((g, i) => {
     const b = g.bbox;
