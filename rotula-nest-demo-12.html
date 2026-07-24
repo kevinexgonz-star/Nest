@@ -1,7 +1,13 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v90 — Nesting · Editor · Capas · Presupuesto    ║
+     ║  ROTULA NEST v91 — Nesting · Editor · Capas · Presupuesto    ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v91: importación PDF a ESCALA — selector de UNIDAD.         ║
+     ║  Muchos PDF de rotulación se dibujan a escala (las cifras    ║
+     ║  son cm, no mm físicos) y entraban 10× pequeños («quita      ║
+     ║  medida»). Nuevo desplegable Unidad (mm/cm/m) al importar,   ║
+     ║  con vista previa del TAMAÑO REAL de las piezas; la          ║
+     ║  elección se recuerda y vale para el arrastre múltiple.      ║
      ║  v90: FIX botón pantalla completa (no agrandaba y            ║
      ║  bloqueaba la app). Causa: overlay position:fixed dentro     ║
      ║  de .fade-in, que retiene transform por su animación → el    ║
@@ -9264,7 +9270,16 @@ function classifyLayerName(rawName) {
   const isAnnot = !isCut && (/^(TIPO|ACABADO|DIMENSIONS?|DIMENSIONES|COTAS?|ESTRUCTURA|TORNILLOS?|CABLES?|COL[_ ]?LEDS?|LEDS?|GOTAS?|MARKS?|MARCAS?|ESPEC\w*|REG(ISTRO)?|NOTAS?|CROQUIS)$/.test(n) || /MATERIAL/.test(n));
   return { isCut, capa, isAnnot };
 }
-async function parsePDFVector(arrayBuffer, userScale) {
+/* Unidad de dibujo del PDF → multiplicador sobre la escala física (mm/punto).
+   Muchos PDF de rotulación se dibujan a escala (las cifras son cm, no mm físicos):
+   'cm' multiplica ×10 para recuperar la medida real. 'mm' = tamaño real 1:1. */
+const PDF_UNITS = [
+  { id: 'mm', label: 'Milímetros (tamaño real 1:1)', mul: 1 },
+  { id: 'cm', label: 'Centímetros (escala 1:10)', mul: 10 },
+  { id: 'm', label: 'Metros (escala 1:100)', mul: 1000 }
+];
+const pdfUnitMul = u => { const f = PDF_UNITS.find(x => x.id === u); return f ? f.mul : 1; };
+async function parsePDFVector(arrayBuffer, userScale, unitMul) {
   await ensurePdfJs();
   const pdf = await pdfjsLib.getDocument({
     data: arrayBuffer.slice(0)
@@ -9279,7 +9294,11 @@ async function parsePDFVector(arrayBuffer, userScale) {
   // ¿El archivo distingue capas de corte (CORTE/CAJEADO/AGUJEROS…)? Solo entonces se filtran
   // las de anotación. Si la única capa es genérica ("Capa 1", "Calque 1"), NO se filtra: todo es corte.
   const _hasCutLayer = _hasOC && Object.keys(_ocGroups).some(id => classifyLayerName(_layerNameOf(id)).isCut);
-  const K = userScale && userScale > 0 ? userScale : 25.4 / 72;
+  // Escala física base: 25.4/72 mm por punto PDF (72 pt = 1", tamaño real 1:1).
+  // unitMul reinterpreta la unidad del dibujo: cm → ×10, m → ×1000 (para PDF a escala,
+  // p.ej. dibujado en mm pero cuyas cifras representan cm). userScale (si se indica) es
+  // el valor absoluto mm/unidad y manda sobre todo lo demás.
+  const K = (userScale && userScale > 0 ? userScale : 25.4 / 72) * (unitMul > 0 ? unitMul : 1);
   const svgParts = [];
   const _dropAnnot = {}, _keptUnknown = {}, _orphanDrop = {}; // v81: contadores para avisos
   /* v81: ¿el archivo lleva datos nativos de Illustrator? Si los lleva y la capa PDF
@@ -9733,9 +9752,9 @@ async function parsePDFVector(arrayBuffer, userScale) {
       sparseDoc: _sparseDoc, pieceAreaPct: _docArea > 0 ? Math.round(1000 * _pieceArea / _docArea) / 10 : null } // v81
   };
 }
-async function parsePDF(arrayBuffer, userScale) {
+async function parsePDF(arrayBuffer, userScale, unitMul) {
   try {
-    const v = await parsePDFVector(arrayBuffer, userScale);
+    const v = await parsePDFVector(arrayBuffer, userScale, unitMul);
     if (v && v.pieces.length) return v;
     console.warn("PDF sin trazados vectoriales → fallback raster");
   } catch (e) {
@@ -9743,9 +9762,10 @@ async function parsePDF(arrayBuffer, userScale) {
   } finally {
     reportProgress(null);
   }
-  return parsePDFRaster(arrayBuffer.slice(0), userScale);
+  return parsePDFRaster(arrayBuffer.slice(0), userScale, unitMul);
 }
-async function parsePDFRaster(arrayBuffer, userScale) {
+async function parsePDFRaster(arrayBuffer, userScale, unitMul) {
+  const _um = unitMul > 0 ? unitMul : 1;
   await ensurePdfJs();
   const pdf = await pdfjsLib.getDocument({
     data: arrayBuffer
@@ -9839,7 +9859,7 @@ async function parsePDFRaster(arrayBuffer, userScale) {
       }
       merged.push(group);
     }
-    const ptToMm = userScale > 0 ? userScale : 0.3528 / scale;
+    const ptToMm = (userScale > 0 ? userScale : 0.3528 / scale) * _um;
     for (let i = 0; i < merged.length; i++) {
       const bb = merged[i];
       const pad = 2 * scale;
@@ -9878,7 +9898,7 @@ async function parsePDFRaster(arrayBuffer, userScale) {
   };
   return {
     pieces: allPieces,
-    scale: userScale > 0 ? userScale : 0.1764,
+    scale: (userScale > 0 ? userScale : 0.1764) * _um,
     unit: 'pt (PDF)',
     docW: allPieces.reduce((s, p) => Math.max(s, p.w), 0),
     docH: allPieces.reduce((s, p) => Math.max(s, p.h), 0)
@@ -15753,6 +15773,12 @@ function App() {
     if (autoNest) runNesting(mapped);
   };
   const [importInfo, setImportInfo] = useState(null);
+  // Unidad de dibujo elegida para PDF/AI (recordada). Aplica al modal de importación
+  // y también a la importación múltiple por arrastre.
+  const [importUnit, setImportUnit] = useState(() => LS.get('np-pdf-unit', 'mm'));
+  const saveImportUnit = u => { setImportUnit(u); LS.set('np-pdf-unit', u); };
+  // Escala efectiva (mm por unidad) editable en el modal de importación.
+  const [importScale, setImportScale] = useState(0);
   const processFile = async (data, name) => {
     const ext = name.toLowerCase();
     const isPdf = ext.endsWith('.pdf') || ext.endsWith('.ai');
@@ -15781,6 +15807,8 @@ function App() {
           isPdf,
           isDxf
         });
+        // Escala inicial: para PDF/AI aplica la unidad recordada (mm/cm/m); resto 1:1.
+        setImportScale(result.scale * (isPdf ? pdfUnitMul(importUnit) : 1));
         reportProgress(null);
         return result.pieces.length;
       }
@@ -15843,7 +15871,8 @@ function App() {
   });
   const parseOne = async (data, name) => {
     const n = name.toLowerCase();
-    if (n.endsWith(".pdf") || n.endsWith(".ai")) return await parsePDF(data);
+    // Importación múltiple (arrastre): aplica la unidad de dibujo recordada a los PDF/AI.
+    if (n.endsWith(".pdf") || n.endsWith(".ai")) return await parsePDF(data, 0, pdfUnitMul(importUnit));
     if (n.endsWith(".dxf")) return parseDXF(data);
     return parseSVG(data);
   };
@@ -16761,13 +16790,17 @@ function App() {
       fontSize: 14,
       fontWeight: 700
     }
-  }, importInfo.docW, " \xD7 ", importInfo.docH, " mm"))), React.createElement("div", {
+  }, Math.round(importInfo.docW * ((importScale > 0 ? importScale : importInfo.scale) / importInfo.scale)), " \xD7 ", Math.round(importInfo.docH * ((importScale > 0 ? importScale : importInfo.scale) / importInfo.scale)), " mm"))), React.createElement("div", {
     style: {
       padding: 12,
       background: "#f4f5f7",
       borderRadius: 8,
       border: "1px solid #eee",
       marginBottom: 16
+    }
+  }, importInfo.isPdf && React.createElement("div", {
+    style: {
+      marginBottom: 12
     }
   }, React.createElement("div", {
     style: {
@@ -16776,7 +16809,42 @@ function App() {
       letterSpacing: 0.5,
       marginBottom: 6
     }
-  }, "ESCALA (mm por unidad SVG)"), React.createElement("div", {
+  }, "UNIDAD DEL DIBUJO (PDF)"), React.createElement("select", {
+    value: importUnit,
+    onChange: e => {
+      const u = e.target.value;
+      saveImportUnit(u);
+      setImportScale(importInfo.scale * pdfUnitMul(u));
+    },
+    style: {
+      width: "100%",
+      padding: "8px 10px",
+      background: "#fafafa",
+      border: "1px solid #eee",
+      borderRadius: 6,
+      color: "#222",
+      fontSize: 13,
+      fontFamily: "'Inter',sans-serif",
+      outline: "none",
+      cursor: "pointer"
+    }
+  }, PDF_UNITS.map(u => React.createElement("option", {
+    key: u.id,
+    value: u.id
+  }, u.label))), React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: "#888",
+      marginTop: 6
+    }
+  }, "Si el PDF se dibuj\xF3 a escala (las cifras representan cm, no mil\xEDmetros f\xEDsicos) elige “Cent\xEDmetros” para recuperar la medida real.")), React.createElement("div", {
+    style: {
+      fontSize: 9,
+      color: "#888",
+      letterSpacing: 0.5,
+      marginBottom: 6
+    }
+  }, importInfo.isPdf ? "AJUSTE FINO (mm por unidad)" : "ESCALA (mm por unidad SVG)"), React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
@@ -16784,9 +16852,10 @@ function App() {
     }
   }, React.createElement("input", {
     type: "number",
-    step: "0.001",
-    defaultValue: importInfo.scale,
+    step: "0.0001",
+    value: importScale > 0 ? importScale : importInfo.scale,
     id: "scaleInput",
+    onChange: e => setImportScale(parseFloat(e.target.value) || 0),
     style: {
       flex: 1,
       padding: "8px 10px",
@@ -16809,13 +16878,19 @@ function App() {
       color: "#888",
       marginTop: 6
     }
-  }, "Si las medidas no coinciden con la realidad, ajusta este valor. Ejemplo: para Inkscape 90DPI usa 0.2822, para Illustrator/Corel 72DPI usa 0.3528")), React.createElement("div", {
+  }, importInfo.isPdf ? "Ajuste manual opcional. Tama\xF1o real 1:1 = escala f\xEDsica " + (Math.round(importInfo.scale * 1e4) / 1e4) + " mm/unidad." : "Si las medidas no coinciden con la realidad, ajusta este valor. Ejemplo: para Inkscape 90DPI usa 0.2822, para Illustrator/Corel 72DPI usa 0.3528"), React.createElement("div", {
     style: {
-      fontSize: 11,
-      color: "#888",
-      marginBottom: 12
+      fontSize: 12,
+      color: "#222",
+      fontWeight: 600,
+      marginTop: 10,
+      paddingTop: 10,
+      borderTop: "1px solid #e5e5e5"
     }
-  }, "Piezas m\xE1s grandes: ", importInfo.pieces.slice(0, 5).map(p => p.w + '×' + p.h + ' mm').join(', ')), React.createElement("div", {
+  }, "Tama\xF1o real de las piezas: ", importInfo.pieces.slice(0, 5).map(p => {
+    const f = (importScale > 0 ? importScale : importInfo.scale) / importInfo.scale;
+    return (Math.round(p.w * f * 10) / 10) + '×' + (Math.round(p.h * f * 10) / 10) + ' mm';
+  }).join(', '))), React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -16824,8 +16899,7 @@ function App() {
   }, React.createElement(Btn, {
     s: true,
     onClick: () => {
-      const v = parseFloat(document.getElementById('scaleInput')?.value);
-      confirmImport(v > 0 ? v : importInfo.scale, 'import');
+      confirmImport(importScale > 0 ? importScale : importInfo.scale, 'import');
     },
     style: {
       flex: "1 1 100px",
@@ -16834,8 +16908,7 @@ function App() {
     }
   }, "\u2795 Importar"), React.createElement("button", {
     onClick: () => {
-      const v = parseFloat(document.getElementById('scaleInput')?.value);
-      confirmImport(v > 0 ? v : importInfo.scale, 'nest');
+      confirmImport(importScale > 0 ? importScale : importInfo.scale, 'nest');
     },
     className: "btn-glow",
     style: {
