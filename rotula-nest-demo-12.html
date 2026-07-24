@@ -1,7 +1,12 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v92 — Nesting · Editor · Capas · Presupuesto    ║
+     ║  ROTULA NEST v93 — Nesting · Editor · Capas · Presupuesto    ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v93: PDF importa en CENTÍMETROS por defecto. Los PDF de     ║
+     ║  rotulación vienen a escala 1:10 (cifras = cm) y por el panel║
+     ║  de pedidos (sin diálogo) entraban 10x pequeños: un 50x70 cm ║
+     ║  daba 50x70 mm. La unidad recordada arranca en cm (clave     ║
+     ║  np-pdf-unit-v2). SVG sigue a tamaño real; mm a un clic.     ║
      ║  v92: el panel de pedidos («Elegir archivo») ya acepta PDF,  ║
      ║  no solo SVG. accept incluye .pdf/.ai; el archivo se lee en  ║
      ║  binario (base64) y va a Nesting con fileType pdf, que el    ║
@@ -15777,10 +15782,13 @@ function App() {
     if (autoNest) runNesting(mapped);
   };
   const [importInfo, setImportInfo] = useState(null);
-  // Unidad de dibujo elegida para PDF/AI (recordada). Aplica al modal de importación
-  // y también a la importación múltiple por arrastre.
-  const [importUnit, setImportUnit] = useState(() => LS.get('np-pdf-unit', 'mm'));
-  const saveImportUnit = u => { setImportUnit(u); LS.set('np-pdf-unit', u); };
+  // Unidad de dibujo elegida para PDF/AI (recordada). Aplica al modal de importación,
+  // al arrastre múltiple y a los PDF que llegan del panel de pedidos.
+  // Por defecto CENTÍMETROS: los PDF de rotulación se dibujan a escala 1:10 (las cifras
+  // son cm), y sin diálogo (panel de pedidos) entrarían 10x pequeños. Los SVG no usan
+  // esta unidad (van por parseSVG a tamaño real). Clave v2 para ignorar el 'mm' previo.
+  const [importUnit, setImportUnit] = useState(() => LS.get('np-pdf-unit-v2', 'cm'));
+  const saveImportUnit = u => { setImportUnit(u); LS.set('np-pdf-unit-v2', u); };
   // Escala efectiva (mm por unidad) editable en el modal de importación.
   const [importScale, setImportScale] = useState(0);
   const processFile = async (data, name) => {
@@ -16841,7 +16849,7 @@ function App() {
       color: "#888",
       marginTop: 6
     }
-  }, "Si el PDF se dibuj\xF3 a escala (las cifras representan cm, no mil\xEDmetros f\xEDsicos) elige “Cent\xEDmetros” para recuperar la medida real.")), React.createElement("div", {
+  }, "Por defecto en cent\xEDmetros: los PDF de rotulaci\xF3n se dibujan a escala 1:10 (las cifras son cm). Si tu PDF est\xE1 a tama\xF1o real, elige “Mil\xEDmetros”.")), React.createElement("div", {
     style: {
       fontSize: 9,
       color: "#888",
