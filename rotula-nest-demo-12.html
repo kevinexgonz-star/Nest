@@ -1,7 +1,17 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v94 — Nesting · Editor · Capas · Presupuesto    ║
+     ║  ROTULA NEST v95 — Nesting · Editor · Capas                  ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v95: HERRAMIENTA LIMPIA. Fuera las pestanas Materiales,     ║
+     ║  Stock e Historial y todo el presupuesto en euros (resumen   ║
+     ║  economico, precio por placa, coste por pieza, material      ║
+     ║  gastado de cabecera, historial de cortes y                  ║
+     ║  consumo/reposicion de stock): la app es el transito panel de║
+     ║  pedidos > nesting > panel de anidados > laser/fresadora, no ║
+     ║  un presupuestador. Queda una sola pagina: anadir archivos,  ║
+     ║  anidar y editar. El resumen pasa a ser de MATERIAL en % y m2║
+     ║  (usado y sobrante); ENVIAR A sigue emitiendo el PDF de vista║
+     ║  previa con las referencias.                                 ║
      ║  v94: IDENTIFICAR PEDIDOS EN LA PLACA. (1) Los PDF entran    ║
      ║  SIEMPRE como capa de corte: antes se adivinaba por el color ║
      ║  del trazo y un corte azul/verde pasaba a hendido/cajeado; si║
@@ -15516,279 +15526,6 @@ function RetalesPanel({ materials, retales, saveRetales, newRetal, setNewRetal, 
               h("button", { onClick: () => bump(r.id, 1), style: _rbtn }, "+")),
             h("button", { onClick: () => del(r.id), style: { padding: "5px 10px", background: "#fff", color: "#c0392b", border: "1px solid #f0d0cc", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "inherit" } }, "Borrar")))));
 }
-/* ── Stock de placas enteras (gestión + aviso de mínimo) ───────────────────────
-   El stock es de AJUSTE MANUAL (entradas/salidas a mano). No se decrementa solo:
-   un corte no presupuestado en la app desincronizaría un decremento automático.
-   El consumo de 60 días se calcula del historial (id = epoch ms) y sólo alimenta
-   la SUGERENCIA de reposición, nunca el número de stock. Clave por material+grosor. */
-function skuKey(matName, thk) {
-  return (matName == null ? "" : matName) + "|" + (thk == null ? "" : thk);
-}
-function consumption60d(history, nowMs, windowDays) {
-  const out = {};
-  if (!Array.isArray(history)) return out;
-  const win = (windowDays || 60) * 86400000;
-  for (const e of history) {
-    if (!e) continue;
-    const t = typeof e.id === "number" ? e.id : (Date.parse(e.id) || 0);
-    if (!t || nowMs - t > win) continue;
-    const mat = e.matName != null ? e.matName : e.material;
-    if (mat == null) continue;
-    const thk = e.thickness != null ? e.thickness : e.thk;
-    // plateSheets = sólo placas enteras (los retales no consumen stock de placa);
-    // entradas antiguas sin ese campo caen a sheets.
-    const n = Number(e.plateSheets != null ? e.plateSheets : e.sheets) || 0;
-    if (n <= 0) continue;
-    const k = skuKey(mat, thk);
-    out[k] = (out[k] || 0) + n;
-  }
-  return out;
-}
-function suggestOrderQty(qty, minQty, cons) {
-  const need = Math.max(0, (Number(minQty) || 0) - (Number(qty) || 0));
-  const cover = Math.ceil(Number(cons) || 0);
-  return Math.max(1, need + cover);
-}
-function applyStockConsumption(stock, matName, thk, plateSheets) {
-  const next = { ...(stock || {}) };
-  const plates = Number(plateSheets) || 0;
-  if (plates <= 0) return next;
-  const k = skuKey(matName, thk);
-  const cur = { qty: 0, minQty: 0, ...(next[k] || {}) };
-  cur.qty = Math.max(0, (Number(cur.qty) || 0) - plates);
-  next[k] = cur;
-  return next;
-}
-function buildOrderMailto(email, lines) {
-  const subject = "Pedido de placas \u00b7 Rotula Nest";
-  const body = "Hola,\n\nNecesito reponer el siguiente material:\n\n" + lines.join("\n") + "\n\nGracias.";
-  return "mailto:" + (email ? encodeURIComponent(email) : "") + "?subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(body);
-}
-function lowStockCount(materials, stock, history, nowMs) {
-  const cons = consumption60d(history || [], nowMs || Date.now(), 60);
-  let n = 0;
-  for (const m of (materials || [])) {
-    const thks = (m.thickness && m.thickness.length) ? m.thickness : [null];
-    for (const thk of thks) {
-      const st = (stock && stock[skuKey(m.name, thk)]) || {};
-      const qty = Number(st.qty) || 0, minQty = Number(st.minQty) || 0;
-      if (minQty > 0 && qty <= minQty) n++;
-    }
-  }
-  return n;
-}
-/* ── Predicci\u00f3n de compra (determinista, explicable) ───────────────────────────
-   Modelo: tasa = consumo en ventana / d\u00edas de ventana (media m\u00f3vil simple).
-   Punto de pedido = tasa \u00d7 (lead + seguridad). Si el stock cae por debajo \u2192 comprar.
-   OJO: hoy la fuente es el historial de PRESUPUESTOS, no cortes ejecutados, as\u00ed que
-   sobreestima. Con el ledger de cortes del backend la misma f\u00f3rmula ser\u00e1 fiable. */
-const _DAY_MS = 86400000;
-function dailyRateMap(history, nowMs, windowDays) {
-  const win = windowDays || 60;
-  const cons = consumption60d(history, nowMs, win);
-  const out = {};
-  for (const k in cons) out[k] = cons[k] / win;
-  return out;
-}
-function forecastSku(qty, dailyRate, leadDays, safetyDays, nowMs) {
-  const rate = Number(dailyRate) || 0;
-  const lead = Number(leadDays) || 0;
-  const safety = Number(safetyDays) || 0;
-  if (rate <= 0) {
-    return { rate: 0, coverageDays: Infinity, reorderPlates: 0, daysToReorder: Infinity, depleteAt: null, reorderAt: null, status: "sin_datos" };
-  }
-  const coverageDays = (Number(qty) || 0) / rate;
-  const reorderPlates = rate * (lead + safety);
-  const daysToReorder = coverageDays - (lead + safety);
-  const status = (Number(qty) || 0) <= reorderPlates ? "comprar" : (daysToReorder <= 14 ? "vigilar" : "ok");
-  return {
-    rate, coverageDays, reorderPlates, daysToReorder,
-    depleteAt: nowMs + coverageDays * _DAY_MS,
-    reorderAt: nowMs + daysToReorder * _DAY_MS,
-    status
-  };
-}
-/* Seed de stock de DEMO: reparto realista y sesgado (alta/media/baja rotaci\u00f3n).
-   Grosores finos con m\u00e1s placas que gruesos. rng inyectable para reproducibilidad. */
-function seedRandomStock(materials, rng) {
-  const r = rng || Math.random;
-  const out = {};
-  for (const m of (materials || [])) {
-    const u = r();
-    const base = u < 0.25 ? (2 + Math.floor(r() * 6))       // baja rotaci\u00f3n: 2-7
-               : u < 0.75 ? (15 + Math.floor(r() * 25))     // media: 15-39
-               : (60 + Math.floor(r() * 60));               // alta: 60-119
-    const thks = (m.thickness && m.thickness.length) ? m.thickness : [null];
-    const sorted = thks.map(t => Number(t) || 0).slice().sort((a, b) => a - b);
-    for (const thk of thks) {
-      const idx = sorted.indexOf(Number(thk) || 0);
-      const thinFactor = thks.length > 1 ? (1 - 0.6 * (idx / (thks.length - 1))) : 1;
-      const qty = Math.max(0, Math.round(base * thinFactor * (0.7 + 0.6 * r())));
-      const minQty = Math.max(1, Math.round(qty * (0.2 + 0.2 * r())));
-      out[skuKey(m.name, thk)] = { qty, minQty };
-    }
-  }
-  return out;
-}
-function buyQtyByRate(dailyRate, qty, leadDays, safetyDays, coverDays) {
-  const rate = Number(dailyRate) || 0;
-  if (rate <= 0) return 0;
-  const targetDays = (Number(leadDays) || 0) + (Number(safetyDays) || 0) + (Number(coverDays) || 0);
-  return Math.max(0, Math.ceil(rate * targetDays - (Number(qty) || 0)));
-}
-function fmtDate(ms) {
-  if (ms == null || !isFinite(ms)) return "\u2014";
-  try { return new Date(ms).toLocaleDateString(); } catch (e) { return "\u2014"; }
-}
-function fmtDays(d) {
-  if (!isFinite(d)) return "\u221e";
-  return (d < 0 ? 0 : Math.round(d)) + "d";
-}
-function stockRank(r) {
-  // 0 = urgente (bajo umbral o a comprar), 1 = vigilar, 2 = ok, 3 = sin datos
-  if (r.low || (r.fc && r.fc.status === "comprar")) return 0;
-  if (r.fc && r.fc.status === "vigilar") return 1;
-  if (r.fc && r.fc.status === "ok") return 2;
-  return 3;
-}
-function StockPanel({ materials, stock, saveStock, stockCfg, saveStockCfg, history, showToast }) {
-  const h = React.createElement;
-  const mats = materials || [];
-  const cfg = stockCfg || {};
-  const win = Math.max(1, Number(cfg.windowDays) || 60);
-  const lead = Math.max(0, Number(cfg.leadDays) || 7);
-  const safety = Math.max(0, Number(cfg.safetyDays) || 7);
-  const coverDays = Math.max(0, Number(cfg.coverDays) || 30);
-  const now = Date.now();
-  const cons = consumption60d(history || [], now, win);
-  const rateMap = dailyRateMap(history || [], now, win);
-  const rows = [];
-  for (const m of mats) {
-    const thks = (m.thickness && m.thickness.length) ? m.thickness : [null];
-    for (const thk of thks) {
-      const k = skuKey(m.name, thk);
-      const st = (stock && stock[k]) || {};
-      const qty = Number(st.qty) || 0;
-      const minQty = Number(st.minQty) || 0;
-      const c = cons[k] || 0;
-      const low = minQty > 0 && qty <= minQty;
-      const fc = forecastSku(qty, rateMap[k] || 0, lead, safety, now);
-      const buyQty = buyQtyByRate(rateMap[k] || 0, qty, lead, safety, coverDays);
-      rows.push({ k, matName: m.name, thk, qty, minQty, cons: c, low, fc, buyQty, suggest: suggestOrderQty(qty, minQty, c) });
-    }
-  }
-  const setCfg = (field, v) => saveStockCfg({ ...cfg, [field]: Math.max(0, parseInt(v, 10) || 0) });
-  const buyRows = rows.filter(r => r.fc.status === "comprar");
-  const watchRows = rows.filter(r => r.fc.status === "vigilar");
-  const lowRows = rows.filter(r => r.low);
-  const setField = (k, field, v) => {
-    const next = { ...(stock || {}) };
-    const cur = { qty: 0, minQty: 0, ...(next[k] || {}) };
-    cur[field] = Math.max(0, parseInt(v, 10) || 0);
-    next[k] = cur;
-    saveStock(next);
-  };
-  const bump = (k, d) => {
-    const next = { ...(stock || {}) };
-    const cur = { qty: 0, minQty: 0, ...(next[k] || {}) };
-    cur.qty = Math.max(0, cur.qty + d);
-    next[k] = cur;
-    saveStock(next);
-  };
-  const lineFor = r => "- " + r.matName + " " + (r.thk == null ? "" : r.thk + "mm") + ": " + r.suggest + " placa(s) (stock " + r.qty + ", m\u00edn " + r.minQty + ", uso 60d " + r.cons + ")";
-  const order = (list, label) => {
-    if (!list.length) { showToast && showToast("No hay material bajo m\u00ednimo", "error"); return; }
-    const url = buildOrderMailto((stockCfg || {}).buyerEmail, list.map(lineFor));
-    if (typeof window !== "undefined") window.location.href = url;
-    showToast && showToast("Borrador de pedido generado" + (label ? " \u00b7 " + label : ""));
-  };
-  const lineForBuy = r => "- " + r.matName + " " + (r.thk == null ? "" : r.thk + "mm") + ": " + r.buyQty + " placa(s) (stock " + r.qty + ", consumo " + r.fc.rate.toFixed(2) + "/d\u00eda, cobertura " + fmtDays(r.fc.coverageDays) + ")";
-  const orderBuy = (list, label) => {
-    const l = list.filter(r => r.buyQty > 0);
-    if (!l.length) { showToast && showToast("Nada que comprar seg\u00fan la predicci\u00f3n", "error"); return; }
-    const url = buildOrderMailto(cfg.buyerEmail, l.map(lineForBuy));
-    if (typeof window !== "undefined") window.location.href = url;
-    showToast && showToast("Borrador de compra generado" + (label ? " \u00b7 " + label : ""));
-  };
-  const STATUS = { comprar: { t: "Comprar", c: "#c0392b", bg: "#fff6f8" }, vigilar: { t: "Vigilar", c: "#b8860b", bg: "#fffdf2" }, ok: { t: "OK", c: "#2e8b57", bg: "#fff" }, sin_datos: { t: "Sin datos", c: "#bbb", bg: "#fff" } };
-  const inputStyle = { padding: "5px 7px", border: "1px solid #ddd", borderRadius: 6, fontSize: 13, fontFamily: "inherit", width: 60, boxSizing: "border-box", textAlign: "center" };
-  const _btn = { width: 26, height: 26, border: "1px solid #ddd", background: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 14, fontFamily: "inherit", padding: 0 };
-  const th = { textAlign: "left", fontSize: 10, color: "#999", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700, padding: "6px 8px", borderBottom: "1px solid #eee", whiteSpace: "nowrap" };
-  const td = { padding: "6px 8px", borderBottom: "1px solid #f4f4f4", fontSize: 13, verticalAlign: "middle" };
-  const [openSku, setOpenSku] = useState({});
-  const [openCfg, setOpenCfg] = useState(false);
-  const toggleSku = k => setOpenSku(o => ({ ...o, [k]: !o[k] }));
-  const skuBadge = r => r.low ? { t: "\u26a0 Bajo", c: "#c0392b", bg: "#fdeef1" }
-    : r.fc.status === "comprar" ? { t: "Comprar", c: "#c0392b", bg: "#fdeef1" }
-    : r.fc.status === "vigilar" ? { t: "Vigilar", c: "#b8860b", bg: "#fffbe9" }
-    : r.fc.status === "ok" ? { t: "OK", c: "#2e8b57", bg: "#eef7f0" }
-    : { t: "Sin datos", c: "#999", bg: "#f3f3f3" };
-  const pill = (t, c, bg) => h("span", { style: { fontSize: 11, fontWeight: 700, color: c, background: bg, borderRadius: 20, padding: "2px 10px", whiteSpace: "nowrap" } }, t);
-  const lblS = { fontSize: 10, color: "#999", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700, marginBottom: 3, display: "block" };
-  const dRow = (label, value) => h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "5px 0", borderBottom: "1px solid #f5f5f5" } },
-    h("span", { style: { fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700 } }, label),
-    h("span", { style: { fontSize: 13, color: "#444", textAlign: "right" } }, value));
-  const card = r => {
-    const sm = skuBadge(r);
-    const isOpen = !!openSku[r.k];
-    return h("div", { key: r.k, style: { border: "1px solid #eee", borderRadius: 10, marginBottom: 8, background: r.low ? "#fff6f8" : "#fff", overflow: "hidden" } },
-      h("div", { onClick: () => toggleSku(r.k), style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", cursor: "pointer" } },
-        h("div", { style: { flex: 1, minWidth: 0 } },
-          h("span", { style: { fontWeight: 700, color: "#222" } }, r.matName),
-          r.thk != null ? h("span", { style: { color: "#999", fontWeight: 400 } }, " \u00b7 " + r.thk + " mm") : null),
-        h("div", { onClick: e => e.stopPropagation(), style: { display: "flex", alignItems: "center", gap: 4 } },
-          h("button", { onClick: () => bump(r.k, -1), style: _btn }, "\u2212"),
-          h("input", { type: "number", min: 0, value: r.qty, onChange: e => setField(r.k, "qty", e.target.value), style: inputStyle }),
-          h("button", { onClick: () => bump(r.k, 1), style: _btn }, "+")),
-        pill(sm.t, sm.c, sm.bg),
-        h("span", { style: { fontSize: 12, color: "#bbb", width: 12, textAlign: "center" } }, isOpen ? "\u25b4" : "\u25be")),
-      isOpen ? h("div", { style: { padding: "2px 12px 12px" } },
-        h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "8px 0 4px", borderBottom: "1px solid #f5f5f5" } },
-          h("span", { style: { fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700 } }, "M\u00ednimo"),
-          h("input", { type: "number", min: 0, value: r.minQty, onChange: e => setField(r.k, "minQty", e.target.value), style: inputStyle })),
-        dRow("Consumo/d\u00eda", r.fc.rate > 0 ? r.fc.rate.toFixed(2) : "\u2014"),
-        dRow("Cobertura", fmtDays(r.fc.coverageDays)),
-        dRow("Se agota", fmtDate(r.fc.depleteAt)),
-        dRow("Pedir antes", r.fc.status === "sin_datos" ? "\u2014" : fmtDate(r.fc.reorderAt)),
-        h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, paddingTop: 8 } },
-          h("span", { style: { fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700 } }, "Sugerido comprar"),
-          (r.low || r.buyQty > 0)
-            ? h("button", { onClick: () => orderBuy([r], r.matName + (r.thk != null ? " " + r.thk + "mm" : "")), style: { padding: "6px 12px", background: "#E6007E", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u2709 " + Math.max(r.buyQty, r.suggest) + " placa(s)")
-            : h("span", { style: { fontSize: 13, color: "#bbb" } }, "\u2014"))) : null);
-  };
-  const sumColor = (buyRows.length || lowRows.length) ? "#c0392b" : "#2e8b57";
-  return h("div", { style: { padding: 16, maxWidth: 880, margin: "0 auto" } },
-    h("h2", { style: { fontSize: 16, fontWeight: 700, color: "#222", margin: "4px 0 12px" } }, "\uD83E\uDDF1 Stock de placas"),
-    h("div", { style: { border: "1px solid #eee", borderRadius: 10, marginBottom: 14, background: "#fafafa", overflow: "hidden" } },
-      h("div", { onClick: () => setOpenCfg(v => !v), style: { display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", cursor: "pointer" } },
-        h("span", { style: { fontSize: 14, fontWeight: 700, color: "#222", flex: 1 } }, "\u2699 Ajustes y pedidos"),
-        h("span", { style: { fontSize: 12, color: "#999", whiteSpace: "nowrap" } }, openCfg ? "ocultar \u25b4" : "abrir \u25be")),
-      openCfg ? h("div", { style: { padding: "0 14px 14px" } },
-        h("div", { style: { fontSize: 12.5, color: "#555", background: "#fff", border: "1px solid #eee", borderRadius: 8, padding: "10px 12px", margin: "0 0 12px", lineHeight: 1.55 } },
-          h("div", { style: { fontWeight: 700, color: "#222", marginBottom: 4 } }, "\u00bfPara qu\u00e9 sirve esto?"),
-          "Te aviso de qu\u00e9 material comprar antes de quedarte sin \u00e9l. Rellena estos 4 datos una vez:",
-          h("div", { style: { marginTop: 6 } }, "\u2022 ", h("b", null, "Historial a revisar"), ": d\u00edas hacia atr\u00e1s que miro para estimar cu\u00e1nto gastas."),
-          h("div", null, "\u2022 ", h("b", null, "Tarda el proveedor"), ": d\u00edas desde que pides hasta que llega el material."),
-          h("div", null, "\u2022 ", h("b", null, "Margen"), ": d\u00edas extra de colch\u00f3n, por si gastas m\u00e1s de lo normal."),
-          h("div", null, "\u2022 ", h("b", null, "Comprar para"), ": cu\u00e1ntos d\u00edas de material quieres tener cuando hagas el pedido.")),
-        h("div", { style: { marginBottom: 12 } },
-          h("label", { style: lblS }, "Email de compras"),
-          h("input", { type: "email", value: (stockCfg || {}).buyerEmail || "", placeholder: "compras@taller.com", onChange: e => saveStockCfg({ ...(stockCfg || {}), buyerEmail: e.target.value }), style: { padding: "7px 9px", border: "1px solid #ddd", borderRadius: 6, fontSize: 13, fontFamily: "inherit", width: 220, maxWidth: "100%", boxSizing: "border-box" } })),
-        h("div", { style: { display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 } },
-          [["windowDays", "Historial a revisar", win], ["leadDays", "Tarda el proveedor", lead], ["safetyDays", "Margen", safety], ["coverDays", "Comprar para", coverDays]].map(p => h("div", { key: p[0] },
-            h("label", { style: lblS }, p[1]),
-            h("div", { style: { display: "flex", alignItems: "center", gap: 5 } },
-              h("input", { type: "number", min: p[0] === "windowDays" ? 1 : 0, value: p[2], onChange: e => setCfg(p[0], e.target.value), style: { ...inputStyle, width: 70 } }),
-              h("span", { style: { fontSize: 12, color: "#999" } }, "d\u00edas"))))),
-        h("div", { style: { fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: (buyRows.length || lowRows.length) ? "#c0392b" : "#2e8b57", marginBottom: 10 } },
-          "A comprar: " + buyRows.length + " \u00b7 Vigilar: " + watchRows.length + " \u00b7 Bajo m\u00ednimo: " + lowRows.length),
-        h("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
-          h("button", { onClick: () => orderBuy(buyRows, "predicci\u00f3n"), disabled: !buyRows.length, style: { padding: "8px 14px", background: buyRows.length ? "#E6007E" : "#eee", color: buyRows.length ? "#fff" : "#aaa", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: buyRows.length ? "pointer" : "default", fontFamily: "inherit", height: 34 } }, "\u2709 Pedir lo que toca comprar"),
-          h("button", { onClick: () => order(lowRows, "todo lo bajo m\u00ednimo"), disabled: !lowRows.length, style: { padding: "8px 14px", background: lowRows.length ? "#E6007E" : "#eee", color: lowRows.length ? "#fff" : "#aaa", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: lowRows.length ? "pointer" : "default", fontFamily: "inherit", height: 34 } }, "\u2709 Pedir todo lo bajo m\u00ednimo"),
-          h("button", { onClick: () => { if (typeof window !== "undefined" && !window.confirm("Esto sobrescribe el stock actual con datos de ejemplo. \u00bfContinuar?")) return; saveStock(seedRandomStock(mats)); showToast && showToast("Stock de ejemplo generado"); }, style: { padding: "8px 14px", background: "#fff", color: "#666", border: "1px solid #ddd", borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", height: 34 } }, "\uD83C\uDFB2 Generar ejemplo"))) : null),
-    h("p", { style: { fontSize: 11, color: "#999", margin: "0 0 8px", lineHeight: 1.5 } }, "Ordenados por urgencia. Toca un material para ver consumo, cobertura y fecha de pedido. Predicci\u00f3n sobre historial de presupuestos (no cortes), tiende a sobreestimar."),
-    h("div", null, rows.slice().sort((a, b) => stockRank(a) - stockRank(b) || a.matName.localeCompare(b.matName) || ((a.thk || 0) - (b.thk || 0))).map(card)));
-}
 function App() {
   const [tab, setTab] = useState("nesting");
   const [editorInbox, setEditorInbox] = useState(null);
@@ -15802,12 +15539,10 @@ function App() {
      PDF: se calcula sobre el conjunto, así dos pedidos nunca comparten color). */
   const _pieceColorMap = React.useMemo(() => orderColorMap(pieces), [pieces]);
   const [nestResult, setNestResult] = useState(null);
-  const [history, setHistory] = useState(() => LS.get("np-hist", []));
   const [editMat, setEditMat] = useState(null);
   const [newMat, setNewMat] = useState(null);
   const [showSendMenu, setShowSendMenu] = useState(false);
   const [activeSheet, setActiveSheet] = useState(0);
-  const [platePrice, setPlatePrice] = useState(150);
   /* v88: "placas verticales" (retrato). Toda placa se orienta con el lado LARGO en vertical:
      ancho = min, alto = max. Afecta nesting, editor, export DXF/SVG y precio (el área w·h es
      invariante al giro, así que el precio no cambia). El giro es equivalente a rotar la misma
@@ -15861,10 +15596,6 @@ function App() {
   const [activeBatchIdx, setActiveBatchIdx] = useState(0);
   const [retales, setRetales] = useState(() => RETALES_ENABLED ? LS.get("np-retales-v1", []) : []);
   const saveRetales = r => { if (!RETALES_ENABLED) return; setRetales(r); LS.set("np-retales-v1", r); };
-  const [stock, setStock] = useState(() => LS.get("np-stock-v1", {}));
-  const saveStock = s => { setStock(s); LS.set("np-stock-v1", s); };
-  const [stockCfg, setStockCfg] = useState(() => LS.get("np-stock-cfg-v1", { buyerEmail: "" }));
-  const saveStockCfg = c => { setStockCfg(c); LS.set("np-stock-cfg-v1", c); };
   const [newRetal, setNewRetal] = useState({ matName: "", thk: "", w: "", h: "", qty: 1, note: "" });
   const progStartRef = useRef(null);
   const [, setProgTick] = useState(0);
@@ -16008,10 +15739,6 @@ function App() {
     setMaterials(m);
     LS.set("np-mats-v2", m);
   };
-  const saveHist = h => {
-    setHistory(h);
-    LS.set("np-hist", h);
-  };
   const showToast = (msg, type = "success") => {
     setToast({
       msg,
@@ -16019,10 +15746,6 @@ function App() {
     });
     setTimeout(() => setToast(null), 2500);
   };
-  useEffect(() => {
-    const n = lowStockCount(materials, stock, history, Date.now());
-    if (n > 0) showToast(n + " material(es) bajo m\u00ednimo \u00b7 revisa la pesta\u00f1a Stock", "error");
-  }, []);
   const sendFromEditor = (newPieces, edSheets) => {
     if (!newPieces || !newPieces.length) {
       showToast("No hay objetos para enviar", "error");
@@ -16402,7 +16125,6 @@ function App() {
     if (!nestResult) return null;
     const mat = materials[selMat] || materials[0];
     if (!mat) return null;
-    const price = platePrice || 0;
     const plateArea = plateW * plateH / 1e6;
     const numSheets = nestResult.length;
     const totalPieces = nestResult.reduce((s, sh) => s + sh.pieces.length, 0);
@@ -16444,15 +16166,12 @@ function App() {
       leftoverAreaTotal += Math.max(0, binArea - bboxArea);
     });
     const efficiency = sheetAreaTotal > 0 ? pieceAreaTotal / sheetAreaTotal * 100 : 0;
-    const pricePerM2 = price / Math.max(0.001, plateArea);
-    // retal = material ya pagado (coste marginal 0); sólo cuentan las placas enteras
-    const totalMaterial = plateSheets * price;
-    const usedCost = usedAreaTotal * pricePerM2;
-    const leftoverValue = leftoverAreaTotal * pricePerM2;
-    const costPerPiece = usedCost / Math.max(1, totalPieces);
+    /* v95: sin euros. La herramienta es el tránsito pedidos → nesting → máquina, así que
+       solo informa de MATERIAL: % aprovechado, % ocupado y % sobrante (con sus m²). */
+    const usedPct = sheetAreaTotal > 0 ? usedAreaTotal / sheetAreaTotal * 100 : 0;
+    const leftoverPct = sheetAreaTotal > 0 ? leftoverAreaTotal / sheetAreaTotal * 100 : 0;
     // ahorro: placas enteras evitadas (área de retal usada / área de una placa)
     const savedPlatesEq = plateArea > 0 ? retalUsedArea / plateArea : 0;
-    const savedValue = savedPlatesEq * price;
     return {
       numSheets,
       totalPieces,
@@ -16461,21 +16180,15 @@ function App() {
       sheetArea: sheetAreaTotal.toFixed(3),
       leftoverArea: leftoverAreaTotal.toFixed(3),
       efficiency: efficiency.toFixed(1),
-      pricePerM2: pricePerM2.toFixed(2),
-      totalMaterial: totalMaterial.toFixed(2),
-      usedCost: usedCost.toFixed(2),
-      leftoverValue: leftoverValue.toFixed(2),
-      costPerPiece: costPerPiece.toFixed(2),
+      usedPct: usedPct.toFixed(1),
+      leftoverPct: leftoverPct.toFixed(1),
       matName: mat.name,
       thickness: mat.thickness[selThk] !== undefined ? mat.thickness[selThk] : mat.thickness[0] || 0,
-      platePrice: price,
       retalSheets,
       plateSheets,
-      savedPlates: savedPlatesEq.toFixed(2),
-      savedValue: savedValue.toFixed(2)
+      savedPlates: savedPlatesEq.toFixed(2)
     };
   };
-  const _leftoversSavedRef = useRef(null);
   const _currentThk = () => {
     const m = materials[selMat] || materials[0] || {};
     return m.thickness ? (m.thickness[selThk] !== undefined ? m.thickness[selThk] : m.thickness[0]) : null;
@@ -16502,67 +16215,11 @@ function App() {
       setEditorSurface(opts[0].id); // sin nesting pero hay retales -> primer retal automáticamente
     }
   }, [editorMode]);
-  const saveLeftovers = silent => {
-    if (!nestResult) return 0;
-    const cands = computeLeftovers(nestResult, plateW, plateH, (materials[selMat] || {}).name, _currentThk());
-    if (!cands.length) { if (!silent) showToast("No hay sobrantes aprovechables (mín. 100 mm de lado)", "error"); return 0; }
-    const entries = cands.map(c => ({ id: mkId("rt"), matName: c.matName, thk: c.thk, w: c.w, h: c.h, qty: 1, note: "auto", ts: Date.now() }));
-    saveRetales([...entries, ...retales]);
-    _leftoversSavedRef.current = nestResult;
-    if (!silent) showToast(entries.length + " retal(es) sobrante(s) guardado(s) en stock");
-    return entries.length;
-  };
   const sendToMachine = machine => {
     const s = getStats();
     if (!s) return;
     const cutId = mkId("CUT-").toUpperCase();
-    const entry = {
-      id: Date.now(),
-      cutId: cutId,
-      machine: machine,
-      date: new Date().toLocaleDateString("es-ES"),
-      material: s.matName,
-      thickness: s.thickness,
-      sheets: s.numSheets,
-      plateSheets: s.plateSheets,
-      efficiency: s.efficiency,
-      totalCost: s.totalMaterial,
-      usedCost: s.usedCost,
-      leftoverValue: s.leftoverValue,
-      costPerPiece: s.costPerPiece,
-      pieceCount: s.totalPieces,
-      plateSize: plateW + 'x' + plateH,
-      platePrice: s.platePrice
-    };
-    const newH = [entry, ...history].slice(0, 500);
-    saveHist(newH);
     setShowSendMenu(false);
-    let __n = 0;
-    let __retConsumed = 0;
-    if (RETALES_ENABLED && _leftoversSavedRef.current !== nestResult) {
-      // Retales CONSUMIDOS: se decrementan los retales usados en el nesting (función pura testeada).
-      const __cr = consumeUsedRetales(retales, nestResult);
-      const __baseRetales = __cr.next;
-      __retConsumed = __cr.consumed;
-      // Sobrantes NUEVOS de este nesting (mismo cálculo que antes).
-      const __cands = computeLeftovers(nestResult, plateW, plateH, (materials[selMat] || {}).name, _currentThk());
-      const __entries = __cands.map(c => ({ id: mkId("rt"), matName: c.matName, thk: c.thk, w: c.w, h: c.h, qty: 1, note: "auto", ts: Date.now() }));
-      __n = __entries.length;
-      // UNA sola escritura: nuevos sobrantes + retales ya decrementados (ninguna pisa a la otra).
-      if (__entries.length || __retConsumed) saveRetales([...__entries, ...__baseRetales]);
-      _leftoversSavedRef.current = nestResult;
-    }
-    // Decremento automático de stock (ejemplo): resta las placas enteras consumidas.
-    // Sólo s.plateSheets; los retales no tocan el stock de placa. Nunca baja de 0.
-    let __stockMsg = "";
-    const __plates = Number(s.plateSheets) || 0;
-    if (__plates > 0) {
-      const __next = applyStockConsumption(stock, s.matName, s.thickness, __plates);
-      saveStock(__next);
-      const __cur = __next[skuKey(s.matName, s.thickness)] || { qty: 0, minQty: 0 };
-      __stockMsg = " \u00b7 stock " + s.matName + " " + (s.thickness != null ? s.thickness + "mm " : "") + "\u2212" + __plates + " (" + __cur.qty + ")";
-      if ((Number(__cur.minQty) || 0) > 0 && __cur.qty <= __cur.minQty) __stockMsg += " \u26a0 bajo m\u00ednimo";
-    }
     /* v94: al enviar a producci\u00f3n se emite el PDF de VISTA PREVIA (referencias rotuladas
        con el color de su pedido). Es el archivo con el que el panel/fresador identifica
        qu\u00e9 pieza pertenece a qu\u00e9 pedido. Si fallara, el env\u00edo NO se pierde: solo se avisa. */
@@ -16574,8 +16231,7 @@ function App() {
       console.error("PDF vista previa", e);
       __pdfMsg = " \u00b7 \u26a0 PDF vista previa fall\u00f3";
     }
-    const __base = "Enviado a " + machine + " \u00b7 ID " + cutId;
-    showToast((__n ? __base + " \u00b7 " + __n + " sobrante(s) \u2192 stock" : __base) + (__retConsumed ? " \u00b7 " + __retConsumed + " retal(es) usado(s) \u2212stock" : "") + __stockMsg + __pdfMsg);
+    showToast("Enviado a " + machine + " \u00b7 ID " + cutId + " \u00b7 " + s.numSheets + " placa(s) \u00b7 " + s.totalPieces + " pieza(s)" + __pdfMsg);
   };
   const _exportPrefix = () => {
     const mat = (materials[selMat]?.name || "mat").replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -16680,7 +16336,6 @@ function App() {
     if (b.matIdx >= 0) {
       setSelMat(b.matIdx);
       setSelThk(_thkIndex(materials[b.matIdx], b.thk));
-      setPlatePrice(materials[b.matIdx].pricePerPlate);
     }
     applyPlate(b.plateW, b.plateH); // v88: retrato
     if (b.result && b.result.length) {
@@ -16877,8 +16532,6 @@ function App() {
       minutes: anyMin ? mins : null
     };
   })();
-  const totalUsed = history.reduce((s, h) => s + parseFloat(h.usedCost || 0), 0);
-  const totalSpent = history.reduce((s, h) => s + parseFloat(h.totalCost || 0), 0);
   return React.createElement("div", {
     className: "fade-in",
     style: {
@@ -17329,76 +16982,11 @@ function App() {
       letterSpacing: 0.3,
       whiteSpace: "nowrap"
     }
-  }, "Nesting & Presupuestos \xB7 ", React.createElement("b", {
+  }, "Anidado para corte \xB7 ", React.createElement("b", {
     style: {
       color: "#E6007E"
     }
-  }, "v90")))), React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "baseline",
-      gap: 7,
-      whiteSpace: "nowrap"
-    }
-  }, React.createElement("span", {
-    style: {
-      fontSize: 9.5,
-      color: "#999",
-      textTransform: "uppercase",
-      letterSpacing: 0.6,
-      fontWeight: 600
-    }
-  }, "Material gastado"), React.createElement("span", {
-    style: {
-      fontSize: 14,
-      fontWeight: 700,
-      color: "#111"
-    }
-  }, "\u20AC", totalUsed.toFixed(2)))), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 0,
-      padding: "0 24px",
-      background: "#fff",
-      borderBottom: "1px solid #eee",
-      overflowX: "auto"
-    }
-  }, [{
-    id: "nesting",
-    l: "🧩 Nesting"
-  }, {
-    id: "materials",
-    l: "📦 Materiales"
-  }, ...(RETALES_ENABLED ? [{
-    id: "retales",
-    l: "♻️ Retales"
-  }] : []), {
-    id: "stock",
-    l: (() => {
-      const n = lowStockCount(materials, stock, history, Date.now());
-      return n > 0
-        ? React.createElement(React.Fragment, null, "🧱 Stock", React.createElement("span", { style: { marginLeft: 6, background: "#c0392b", color: "#fff", borderRadius: 9, fontSize: 10, fontWeight: 700, padding: "1px 6px", verticalAlign: "middle" } }, n))
-        : "🧱 Stock";
-    })()
-  }, {
-    id: "history",
-    l: "🕘 Historial"
-  }].map(t => React.createElement("button", {
-    key: t.id,
-    onClick: () => setTab(t.id),
-    style: {
-      padding: "10px 20px",
-      border: "none",
-      background: "transparent",
-      color: tab === t.id ? "#E6007E" : "#888",
-      cursor: "pointer",
-      fontSize: 13,
-      fontFamily: "inherit",
-      borderBottom: tab === t.id ? "2px solid #E6007E" : "2px solid transparent",
-      fontWeight: tab === t.id ? 700 : 500,
-      transition: "color .15s, border-color .15s"
-    }
-  }, t.l))), tab === "nesting" && React.createElement("div", {
+  }, "v95"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",
@@ -17426,7 +17014,6 @@ function App() {
       setSelMat(i);
       setSelThk(0);
       applyPlate(materials[i].plateW, materials[i].plateH); // v88: retrato
-      setPlatePrice(materials[i].pricePerPlate);
       setNestResult(null);
     }
   }, materials.map((m, i) => React.createElement("option", {
@@ -17459,10 +17046,6 @@ function App() {
       applyPlate(plateW, v); // v88: se reordena a retrato si procede
       setNestResult(null);
     }
-  }), React.createElement(CfgNum, {
-    label: "\u20AC / placa",
-    value: platePrice,
-    onChange: v => setPlatePrice(v)
   }), React.createElement(CfgNum, {
     label: "Avance fresa (mm/min)",
     value: feed,
@@ -17842,32 +17425,14 @@ function App() {
       fontWeight: 700,
       marginBottom: 12
     }
-  }, "RESUMEN ECON\xD3MICO"), React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 8
-    }
-  }, React.createElement(BudgetRow, {
-    label: "Placa " + plateW / 1000 + "m × " + plateH / 1000 + "m = " + stats.sheetArea + " m²",
-    value: "€" + stats.platePrice + "/placa",
-    color: "#6b7280"
-  }), React.createElement(BudgetRow, {
-    label: stats.numSheets + " placa(s) comprada(s)",
-    value: "€" + stats.totalMaterial,
-    bold: true
-  }), React.createElement("div", {
-    style: {
-      borderTop: "1px solid #e2e8f0",
-      margin: "4px 0"
-    }
-  }), React.createElement("div", {
+  }, "APROVECHAMIENTO DE MATERIAL"), React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "1fr 1fr",
-      gap: 10,
-      margin: "4px 0"
+      gap: 10
     }
+    /* v95: la herramienta es un tr\xe1nsito a corte, no un presupuesto: se informa del
+       material en % y m\xb2 (lo que decide si merece la pena reanidar), sin euros. */
   }, React.createElement("div", {
     style: {
       background: "#f0f7ff",
@@ -17884,7 +17449,7 @@ function App() {
       textTransform: "uppercase",
       marginBottom: 4
     }
-  }, "Material Gastado"), React.createElement("div", {
+  }, "Material usado"), React.createElement("div", {
     style: {
       fontSize: 28,
       fontWeight: 800,
@@ -17892,13 +17457,13 @@ function App() {
       fontFamily: "'Inter',sans-serif",
       lineHeight: 1
     }
-  }, "\u20AC", stats.usedCost), React.createElement("div", {
+  }, stats.usedPct, "%"), React.createElement("div", {
     style: {
       fontSize: 12,
       color: "#888",
       marginTop: 6
     }
-  }, stats.usedArea, " m\xB2 de ", stats.sheetArea, " m\xB2")), React.createElement("div", {
+  }, stats.usedArea, " m\xb2 de ", stats.sheetArea, " m\xb2")), React.createElement("div", {
     style: {
       background: "#f0fdf4",
       border: "1px solid #d1fae5",
@@ -17915,7 +17480,7 @@ function App() {
       textTransform: "uppercase",
       marginBottom: 4
     }
-  }, "Material Sobrante"), React.createElement("div", {
+  }, "Material sobrante"), React.createElement("div", {
     style: {
       fontSize: 28,
       fontWeight: 800,
@@ -17923,26 +17488,19 @@ function App() {
       fontFamily: "'Inter',sans-serif",
       lineHeight: 1
     }
-  }, "\u20AC", stats.leftoverValue), React.createElement("div", {
+  }, stats.leftoverPct, "%"), React.createElement("div", {
     style: {
       fontSize: 12,
       color: "#888",
       marginTop: 6
     }
-  }, stats.leftoverArea, " m\xB2 sin usar"))), React.createElement("div", {
+  }, stats.leftoverArea, " m\xb2 sin usar"))), React.createElement("div", {
     style: {
-      borderTop: "1px solid #e2e8f0",
-      margin: "4px 0"
+      fontSize: 11,
+      color: "#888",
+      marginTop: 10
     }
-  }), React.createElement(BudgetRow, {
-    label: "Coste por pieza (" + stats.totalPieces + " piezas)",
-    value: "€" + stats.costPerPiece,
-    bold: true
-  }), React.createElement(BudgetRow, {
-    label: "Precio por m² de material",
-    value: "€" + stats.pricePerM2,
-    color: "#6b7280"
-  })))), React.createElement("div", {
+  }, "Placa ", plateW / 1000, "m \xd7 ", plateH / 1000, "m = ", stats.sheetArea, " m\xb2 \xb7 ", stats.numSheets, " placa(s) \xb7 ", stats.totalPieces, " pieza(s)"))), React.createElement("div", {
     style: {
       margin: "0 14px 10px",
       padding: 14,
@@ -18452,556 +18010,7 @@ function App() {
       color: "#b91c1c",
       fontWeight: 600
     }
-  }, "\u26A0 ClipperLib no carg\xF3: los offsets interiores est\xE1n desactivados. Se necesita conexi\xF3n a internet al abrir la app (cdnjs/unpkg).")))), tab === "materials" && React.createElement("div", {
-    style: {
-      padding: 20
-    }
-  }, React.createElement("div", {
-    className: "fade-in",
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      marginBottom: 16
-    }
-  }, React.createElement("span", {
-    style: {
-      fontSize: 11,
-      color: "#888",
-      fontWeight: 600
-    }
-  }, "CAT\xC1LOGO DE MATERIALES"), React.createElement(Btn, {
-    p: true,
-    onClick: () => setNewMat({
-      id: Date.now(),
-      name: "",
-      thickness: [1, 2, 3],
-      pricePerPlate: 0,
-      plateW: 3000,
-      plateH: 1500
-    })
-  }, "+ Nuevo Material")), newMat && React.createElement("div", {
-    className: "slide-up",
-    style: {
-      padding: 20,
-      background: "#fff",
-      borderRadius: 10,
-      border: "1px solid #eee",
-      marginBottom: 16
-    }
-  }, React.createElement("h4", {
-    style: {
-      color: "#111",
-      margin: "0 0 12px",
-      fontSize: 14,
-      fontFamily: "'Inter',sans-serif"
-    }
-  }, "Nuevo Material"), React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))",
-      gap: 10,
-      marginBottom: 12
-    }
-  }, React.createElement(Cfg, {
-    label: "Nombre"
-  }, React.createElement("input", {
-    value: newMat.name,
-    onChange: e => setNewMat({
-      ...newMat,
-      name: e.target.value
-    })
-  })), React.createElement(Cfg, {
-    label: "Grosores (coma)"
-  }, React.createElement("input", {
-    value: newMat.thickness.join(", "),
-    onChange: e => setNewMat({
-      ...newMat,
-      thickness: e.target.value.split(",").map(s => parseFloat(s.trim())).filter(n => !isNaN(n))
-    })
-  })), React.createElement(Cfg, {
-    label: "\u20AC/Placa"
-  }, React.createElement("input", {
-    type: "number",
-    value: newMat.pricePerPlate,
-    onChange: e => setNewMat({
-      ...newMat,
-      pricePerPlate: +e.target.value
-    })
-  })), React.createElement(Cfg, {
-    label: "Ancho mm"
-  }, React.createElement("input", {
-    type: "number",
-    value: newMat.plateW,
-    onChange: e => setNewMat({
-      ...newMat,
-      plateW: +e.target.value
-    })
-  })), React.createElement(Cfg, {
-    label: "Alto mm"
-  }, React.createElement("input", {
-    type: "number",
-    value: newMat.plateH,
-    onChange: e => setNewMat({
-      ...newMat,
-      plateH: +e.target.value
-    })
-  }))), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8
-    }
-  }, React.createElement(Btn, {
-    p: true,
-    onClick: () => {
-      if (newMat.name) {
-        saveMats([...materials, newMat]);
-        setNewMat(null);
-        showToast("Material añadido");
-      }
-    }
-  }, "Guardar"), React.createElement(Btn, {
-    s: true,
-    onClick: () => setNewMat(null)
-  }, "Cancelar"))), React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fill,minmax(310px,1fr))",
-      gap: 12
-    }
-  }, materials.map((m, idx) => React.createElement("div", {
-    key: m.id,
-    className: "card-hover",
-    style: {
-      padding: 16,
-      background: "#fff",
-      borderRadius: 8,
-      border: "1px solid #eee"
-    }
-  }, editMat === idx ? React.createElement("div", null, React.createElement(Cfg, {
-    label: "Nombre"
-  }, React.createElement("input", {
-    value: m.name,
-    onChange: e => {
-      const u = [...materials];
-      u[idx] = {
-        ...u[idx],
-        name: e.target.value
-      };
-      setMaterials(u);
-    }
-  })), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8,
-      margin: "8px 0"
-    }
-  }, React.createElement(Cfg, {
-    label: "\u20AC/Placa",
-    style: {
-      flex: 1
-    }
-  }, React.createElement("input", {
-    type: "number",
-    value: m.pricePerPlate,
-    onChange: e => {
-      const u = [...materials];
-      u[idx] = {
-        ...u[idx],
-        pricePerPlate: +e.target.value
-      };
-      setMaterials(u);
-    }
-  })), React.createElement(Cfg, {
-    label: "Ancho",
-    style: {
-      flex: 1
-    }
-  }, React.createElement("input", {
-    type: "number",
-    value: m.plateW,
-    onChange: e => {
-      const u = [...materials];
-      u[idx] = {
-        ...u[idx],
-        plateW: +e.target.value
-      };
-      setMaterials(u);
-    }
-  })), React.createElement(Cfg, {
-    label: "Alto",
-    style: {
-      flex: 1
-    }
-  }, React.createElement("input", {
-    type: "number",
-    value: m.plateH,
-    onChange: e => {
-      const u = [...materials];
-      u[idx] = {
-        ...u[idx],
-        plateH: +e.target.value
-      };
-      setMaterials(u);
-    }
-  }))), React.createElement(Cfg, {
-    label: "Grosores (coma)"
-  }, React.createElement("input", {
-    value: m.thickness.join(", "),
-    onChange: e => {
-      const u = [...materials];
-      u[idx] = {
-        ...u[idx],
-        thickness: e.target.value.split(",").map(s => parseFloat(s.trim())).filter(n => !isNaN(n))
-      };
-      setMaterials(u);
-    }
-  })), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8,
-      marginTop: 10
-    }
-  }, React.createElement(Btn, {
-    p: true,
-    onClick: () => {
-      saveMats(materials);
-      setEditMat(null);
-      showToast("Material guardado");
-    }
-  }, "Guardar"), React.createElement(Btn, {
-    s: true,
-    onClick: () => setEditMat(null)
-  }, "Cancelar"))) : React.createElement(React.Fragment, null, React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      marginBottom: 10
-    }
-  }, React.createElement("h4", {
-    style: {
-      margin: 0,
-      fontSize: 16,
-      fontWeight: 700,
-      color: "#111",
-      fontFamily: "'Inter',sans-serif"
-    }
-  }, m.name), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 5
-    }
-  }, React.createElement(IconBtn, {
-    onClick: () => setEditMat(idx)
-  }, "\u270E"), React.createElement(IconBtn, {
-    onClick: () => {
-      if (confirm('¿Eliminar ' + m.name + '?')) {
-        const nm = materials.filter((_, i) => i !== idx);
-        saveMats(nm);
-        if (selMat >= nm.length) setSelMat(Math.max(0, nm.length - 1));
-        setSelThk(0);
-        showToast("Material eliminado");
-      }
-    }
-  }, "\u2715"))), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 18,
-      marginBottom: 10
-    }
-  }, React.createElement(MetaItem, {
-    l: "\u20AC/placa",
-    v: "€" + m.pricePerPlate
-  }), React.createElement(MetaItem, {
-    l: "\u20AC/m\xB2",
-    v: "€" + (m.pricePerPlate / (m.plateW * m.plateH / 1e6)).toFixed(2)
-  }), React.createElement(MetaItem, {
-    l: "Placa",
-    v: m.plateW + "×" + m.plateH
-  })), React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 6,
-      flexWrap: "wrap"
-    }
-  }, React.createElement("span", {
-    style: {
-      fontSize: 9,
-      color: "#aaa",
-      letterSpacing: 1
-    }
-  }, "GROSORES:"), m.thickness.map(t => React.createElement("span", {
-    key: t,
-    style: {
-      padding: "2px 7px",
-      background: "#f5f5f5",
-      borderRadius: 4,
-      fontSize: 10,
-      color: "#888",
-      border: "1px solid #eee"
-    }
-  }, t, "mm")))))))), RETALES_ENABLED && tab === "retales" && React.createElement(RetalesPanel, {
-    materials: materials,
-    retales: retales,
-    saveRetales: saveRetales,
-    newRetal: newRetal,
-    setNewRetal: setNewRetal,
-    selMat: selMat,
-    showToast: showToast
-  }), tab === "stock" && React.createElement(StockPanel, {
-    materials: materials,
-    stock: stock,
-    saveStock: saveStock,
-    stockCfg: stockCfg,
-    saveStockCfg: saveStockCfg,
-    history: history,
-    showToast: showToast
-  }), tab === "history" && React.createElement("div", {
-    style: {
-      padding: 20
-    }
-  }, React.createElement("div", {
-    className: "fade-in",
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      marginBottom: 16,
-      flexWrap: "wrap",
-      gap: 12
-    }
-  }, React.createElement("span", {
-    style: {
-      fontSize: 11,
-      color: "#888",
-      fontWeight: 600
-    }
-  }, "HISTORIAL DE PRESUPUESTOS"), React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 20
-    }
-  }, React.createElement("div", {
-    style: {
-      textAlign: "right"
-    }
-  }, React.createElement("div", {
-    style: {
-      fontSize: 9,
-      color: "#aaa",
-      letterSpacing: 1
-    }
-  }, "PRESUPUESTOS"), React.createElement("div", {
-    style: {
-      fontSize: 20,
-      fontWeight: 800,
-      fontFamily: "'Inter',sans-serif"
-    }
-  }, history.length)), React.createElement("div", {
-    style: {
-      textAlign: "right"
-    }
-  }, React.createElement("div", {
-    style: {
-      fontSize: 9,
-      color: "#aaa",
-      letterSpacing: 1
-    }
-  }, "TOTAL GASTADO"), React.createElement("div", {
-    style: {
-      fontSize: 20,
-      fontWeight: 800,
-      color: "#111",
-      fontFamily: "'Inter',sans-serif"
-    }
-  }, "\u20AC", totalUsed.toFixed(2))), React.createElement("div", {
-    style: {
-      textAlign: "right"
-    }
-  }, React.createElement("div", {
-    style: {
-      fontSize: 9,
-      color: "#aaa",
-      letterSpacing: 1
-    }
-  }, "TOTAL PLACAS"), React.createElement("div", {
-    style: {
-      fontSize: 20,
-      fontWeight: 800,
-      color: "#444",
-      fontFamily: "'Inter',sans-serif"
-    }
-  }, "\u20AC", totalSpent.toFixed(2))))), !history.length ? React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: 60,
-      gap: 12
-    }
-  }, React.createElement("div", {
-    style: {
-      fontSize: 48,
-      color: "#e2e8f0"
-    }
-  }, "\u25F7"), React.createElement("p", {
-    style: {
-      color: "#888",
-      fontSize: 13
-    }
-  }, "No hay presupuestos guardados todav\xEDa")) : React.createElement("div", {
-    style: {
-      background: "#fff",
-      borderRadius: 8,
-      border: "1px solid #eee",
-      overflow: "auto"
-    }
-  }, React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 6,
-      padding: "10px 14px",
-      background: "#f4f5f7",
-      borderBottom: "1px solid #eee",
-      fontSize: 9,
-      color: "#aaa",
-      letterSpacing: 1,
-      textTransform: "uppercase",
-      fontWeight: 700,
-      minWidth: 1000
-    }
-  }, React.createElement("span", {
-    style: {
-      flex: .7
-    }
-  }, "Fecha"), React.createElement("span", {
-    style: {
-      flex: .9
-    }
-  }, "ID Corte"), React.createElement("span", {
-    style: {
-      flex: 1.3
-    }
-  }, "M\u00e1quina"), React.createElement("span", {
-    style: {
-      flex: .9
-    }
-  }, "Material"), React.createElement("span", {
-    style: {
-      flex: .4
-    }
-  }, "mm"), React.createElement("span", {
-    style: {
-      flex: .3
-    }
-  }, "Plac."), React.createElement("span", {
-    style: {
-      flex: .3
-    }
-  }, "Pzas"), React.createElement("span", {
-    style: {
-      flex: .5
-    }
-  }, "Efic."), React.createElement("span", {
-    style: {
-      flex: .6
-    }
-  }, "Gastado"), React.createElement("span", {
-    style: {
-      flex: .6
-    }
-  }, "Sobrante"), React.createElement("span", {
-    style: {
-      flex: .6
-    }
-  }, "\u20AC/pieza"), React.createElement("span", {
-    style: {
-      flex: .3
-    }
-  })), history.map(h => React.createElement("div", {
-    key: h.id,
-    style: {
-      display: "flex",
-      gap: 6,
-      padding: "9px 14px",
-      borderBottom: "1px solid #eee",
-      fontSize: 12,
-      alignItems: "center",
-      minWidth: 1000
-    }
-  }, React.createElement("span", {
-    style: {
-      flex: .7,
-      fontSize: 11,
-      color: "#888"
-    }
-  }, h.date), React.createElement("span", {
-    style: {
-      flex: .9,
-      fontSize: 11,
-      fontFamily: "monospace",
-      color: "#666",
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap"
-    }
-  }, h.cutId || "\u2014"), React.createElement("span", {
-    style: {
-      flex: 1.3,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap"
-    }
-  }, h.machine || "\u2014"), React.createElement("span", {
-    style: {
-      flex: .9
-    }
-  }, h.material), React.createElement("span", {
-    style: {
-      flex: .4
-    }
-  }, h.thickness), React.createElement("span", {
-    style: {
-      flex: .3
-    }
-  }, h.sheets), React.createElement("span", {
-    style: {
-      flex: .3
-    }
-  }, h.pieceCount), React.createElement("span", {
-    style: {
-      flex: .5,
-      color: parseFloat(h.efficiency) > 70 ? "#16a34a" : "#d97706",
-      fontWeight: 600
-    }
-  }, h.efficiency, "%"), React.createElement("span", {
-    style: {
-      flex: .6,
-      color: "#2563eb",
-      fontWeight: 700
-    }
-  }, "\u20AC", h.usedCost || h.totalCost), React.createElement("span", {
-    style: {
-      flex: .6,
-      color: "#16a34a",
-      fontWeight: 600
-    }
-  }, "\u20AC", h.leftoverValue || '--'), React.createElement("span", {
-    style: {
-      flex: .6,
-      color: "#444",
-      fontWeight: 600
-    }
-  }, "\u20AC", h.costPerPiece || '--'), React.createElement("span", {
-    style: {
-      flex: .3
-    }
-  }, React.createElement(IconBtn, {
-    onClick: () => saveHist(history.filter(x => x.id !== h.id))
-  }, "\u2715")))))));
+  }, "\u26A0 ClipperLib no carg\xF3: los offsets interiores est\xE1n desactivados. Se necesita conexi\xF3n a internet al abrir la app (cdnjs/unpkg).")))));
 }
 function CfgNum({
   label,
@@ -19211,33 +18220,6 @@ function Stat({
       color: "#aaa"
     }
   }, l));
-}
-function BudgetRow({
-  label,
-  value,
-  bold,
-  color
-}) {
-  return React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center"
-    }
-  }, React.createElement("span", {
-    style: {
-      fontSize: 13,
-      color: color || "#374151",
-      fontWeight: bold ? 600 : 400
-    }
-  }, label), React.createElement("span", {
-    style: {
-      fontSize: bold ? 16 : 14,
-      fontWeight: bold ? 800 : 600,
-      color: color || "#1e293b",
-      fontFamily: "'Inter',sans-serif"
-    }
-  }, value));
 }
 function MetaItem({
   l,
