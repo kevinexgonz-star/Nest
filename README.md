@@ -9,6 +9,7 @@ Software web de nesting 2D para optimización de corte CNC. Archivos *standalone
 | **`rotula-nest-demo.html`** | Demo completa: **panel de pedidos** (Wolfcut) **+ nesting**. Arranca en el panel de pedidos; al enviar, pasa a la herramienta de nesting. | Ver el flujo completo pedidos → nesting → producción. |
 | **`rotula-nest.html`** | **Solo el panel de nesting**, ya extraído del panel de pedidos y listo para integrar. | Embeber el motor de nesting en otro sistema (ERP, panel propio…). |
 | `archive/` | Versiones anteriores (`rotula-nest-demo-3` … `-11`). | Referencia histórica. |
+| `backend/` | API PHP + esquema MySQL para servir pedidos **por id** desde una base de datos. | Integrar el nesting con una BD (ver más abajo). |
 
 ## Uso
 
@@ -44,6 +45,22 @@ Abre cualquiera de los dos HTML directamente en Chrome. React, ReactDOM y Clippe
 
 - **Hash en la URL**: abrir `rotula-nest.html#rotula=<base64>` donde el base64 es
   `JSON.stringify({ orders: [...] })` (con el mismo formato de arriba).
+
+### Recibir los archivos como ids (base de datos)
+
+`rotula-nest.html` acepta pedidos que traen **solo un id** en vez del archivo:
+
+```js
+{ type: "ROTULA_NEST_LOAD", payload: { orders: [ { id: "PED-001" }, { id: "PED-002", qty: 10 } ] } }
+```
+
+Cuando un pedido no trae `content`, la app hace `GET {API_BASE}/orders/{id}` y
+espera `{ref, fileName, fileType, content, matName, thk, qty}`. `API_BASE` es
+`/api` por defecto y se puede cambiar con `window.NEST_API_BASE`. Los envíos con
+`content` inline siguen funcionando igual (100% compatible).
+
+La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQL**
+(esquema, endpoints y guía de despliegue).
 
 ## Funciones
 

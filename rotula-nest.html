@@ -16311,6 +16311,22 @@ function App() {
     for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
     return buf.buffer;
   };
+  /* Integración por BD: base de la API. Sírvelo desde el mismo origen que el
+     backend PHP (p.ej. https://tu-erp/nest/) para no necesitar CORS. Se puede
+     sobreescribir con window.NEST_API_BASE antes de cargar la app. */
+  const API_BASE = (typeof window !== "undefined" && window.NEST_API_BASE) || "/api";
+  /* Resuelve un pedido que llega SOLO con id contra el backend. Si ya trae
+     `content` (envío inline de siempre), lo devuelve tal cual → 100% compatible.
+     El backend responde: {ref, fileName, fileType, content, matName, thk, qty}. */
+  const resolveOrder = async o => {
+    if (o.content != null) return o;
+    const id = o.id != null ? o.id : o.fileId;
+    if (id == null) return o;
+    const r = await fetch(API_BASE + "/orders/" + encodeURIComponent(id));
+    if (!r.ok) throw new Error("HTTP " + r.status + " al pedir el pedido " + id);
+    const rec = await r.json();
+    return { ...rec, ...o, content: rec.content, fileType: o.fileType || rec.fileType };
+  };
   const _thkIndex = (mat, thk) => {
     if (!mat || !mat.thickness) return 0;
     const i = mat.thickness.indexOf(thk);
@@ -16365,7 +16381,14 @@ function App() {
     reportProgress(2, "Recibiendo pedidos…");
     const byMat = new Map();
     const failed = [];
-    for (const o of orders) {
+    for (let o of orders) {
+      try {
+        o = await resolveOrder(o); // BD: si el pedido llega como id, trae aquí su archivo
+      } catch (e) {
+        console.error("resolve fail", o.ref || o.id, e);
+        failed.push(o.ref || o.id || o.fileName);
+        continue;
+      }
       let res = null;
       try {
         if ((o.fileType || "").toLowerCase() === "svg") res = parseSVG(o.content);else res = await parsePDF(_b64ToBuf(o.content), 0, pdfUnitMul(importUnit));

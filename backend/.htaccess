@@ -1,0 +1,7 @@
+# Reescribe /api/... -> api.php/... (Apache + mod_rewrite).
+# Coloca este backend de modo que las peticiones a /api/ lleguen aquí.
+RewriteEngine On
+RewriteBase /api/
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ api.php/$1 [L,QSA]
