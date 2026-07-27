@@ -199,7 +199,19 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <!-- demo-4: React 18.2.0, ReactDOM 18.2.0 y ClipperLib 6.4.2 EMBEBIDOS (antes CDN).
      La demo ya no depende de la red: sin internet cargan igual (file:// 100% offline). -->
-<script>/* react@18.2.0/umd/react.production.min.js (embebido) */
+<!-- ── MAPA DE BLOQUES <script> ────────────────────────────────────────────
+     Este HTML es standalone (se abre en Chrome sin servidor ni build). El
+     código va repartido en varios <script>, en este orden:
+       1. React            (librería embebida — no editar)
+       2. ReactDOM         (librería embebida — no editar)
+       3. ClipperLib       (librería embebida — no editar)
+       4. ROTULA_WASM      (motor geométrico WASM: Minkowski/offset — generado)
+       5. RotulaNFP        (motor de nesting NFP — módulo self-contained)
+       6. pieceOutlineMM   (contorno de nesting sin DOM — módulo self-contained)
+       7. APLICACIÓN        (todo lo demás: parsers, motor grid, App y UI)
+     La sección 7 lleva su propio índice interno (busca "§N ·").
+     ──────────────────────────────────────────────────────────────────────── -->
+<script>/* react@18.2.0/umd/react.production.min.js (embebido — no editar) */
 /**
  * @license React
  * react.production.min.js
@@ -8658,6 +8670,37 @@ return ret;
      ╚══════════════════════════════════════════════════════════════════╝ -->
 
 <script>
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║  ROTULA NEST · SCRIPT PRINCIPAL DE LA APLICACIÓN                          ║
+   ║                                                                          ║
+   ║  Contiene TODA la lógica de la app. Los <script> anteriores son          ║
+   ║  librerías/módulos embebidos (React, ReactDOM, ClipperLib, WASM, el      ║
+   ║  motor RotulaNFP y pieceOutlineMM) y no se editan.                        ║
+   ║                                                                          ║
+   ║  ÍNDICE — busca "§N ·" para saltar a cada sección:                       ║
+   ║   §1  Arranque y cargadores diferidos (pdf.js, opentype)                 ║
+   ║   §2  Datos y configuración (materiales, capas, nesting, colores)        ║
+   ║   §3  Capas de corte: color, referencia e identidad de pedido            ║
+   ║   §4  Geometría base y offset (ClipperLib)                               ║
+   ║   §5  Piezas de demostración                                             ║
+   ║   §6  Parsers de importación (PDF · DXF · SVG)                           ║
+   ║   §7  Motor de nesting (máscaras · colocación · NFP)                     ║
+   ║   §8  Retales y sobrantes                                                ║
+   ║   §9  Vista, muestreo y geometría de exportación                         ║
+   ║   §10 Exportadores: DXF · SVG · PDF y descarga                           ║
+   ║   §11 Persistencia (localStorage) y utilidades                          ║
+   ║   §12 Editor vectorial: geometría, fuentes y helpers                     ║
+   ║   §13 Componente: VectorEditor                                           ║
+   ║   §14 Integración y datos de taller (ids, máquinas, retales)             ║
+   ║   §15 Componente principal: App                                          ║
+   ║   §16 Componentes de UI reutilizables                                    ║
+   ║   §17 Montaje en el DOM                                                   ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   §1 · ARRANQUE Y CARGADORES DIFERIDOS
+   Hooks de React y carga perezosa de pdf.js / opentype.js (solo al importar).
+   ═══════════════════════════════════════════════════════════════════════════ */
 const {
   useState,
   useEffect,
@@ -8701,6 +8744,11 @@ function ensureOpentype() {
   });
   return _otP;
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §2 · DATOS Y CONFIGURACIÓN
+   Materiales y placas, hueco entre piezas (GAP), config de nesting, capas de
+   corte iniciales y paleta de colores.
+   ═══════════════════════════════════════════════════════════════════════════ */
 const MATERIALS_INIT = [{
   id: 1,
   name: "PVC",
@@ -8781,6 +8829,11 @@ const CAPAS_INIT = [{
   color: "#FF7F00",
   offsetMM: 0
 }];
+/* ═══════════════════════════════════════════════════════════════════════════
+   §3 · CAPAS DE CORTE: COLOR, REFERENCIA E IDENTIDAD DE PEDIDO
+   Resolución de capa por color/DXF, color determinista por pedido (referencia),
+   rótulos por pieza y edición de capa sobre el SVG.
+   ═══════════════════════════════════════════════════════════════════════════ */
 const capaById = (capas, id) => capas.find(c => c.id === id) || capas[0] || CAPAS_INIT[0];
 /* v80: nombre de capa VERBATIM para DXF/SVG. Conserva espacios y acentos tal cual vienen
    de Illustrator (ej. "LAT\u00d3N CORTE"); solo elimina comillas y caracteres de control.
@@ -9007,6 +9060,11 @@ function dominantCapa(piece) {
   list.forEach(c => counts[c] = (counts[c] || 0) + 1);
   return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §4 · GEOMETRÍA BASE Y OFFSET (ClipperLib)
+   Escala de trabajo de Clipper, disponibilidad del motor, offset de polígonos
+   cerrados (cajeado) y utilidades de polilínea.
+   ═══════════════════════════════════════════════════════════════════════════ */
 const CLIP_SCALE = 1000;
 function clipperOK() {
   return typeof ClipperLib !== "undefined";
@@ -9065,6 +9123,10 @@ function plLen(pts) {
   for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
   return L;
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §5 · PIEZAS DE DEMOSTRACIÓN
+   Formas de ejemplo (botón "Cargar Demo") para probar la app sin importar nada.
+   ═══════════════════════════════════════════════════════════════════════════ */
 function genDemoPieces() {
   let s = 0x9e3779b9;
   const rnd = () => {
@@ -9316,6 +9378,11 @@ function genDemoPieces() {
   return pieces;
 }
 const DEMO_PIECES = genDemoPieces();
+/* ═══════════════════════════════════════════════════════════════════════════
+   §6 · PARSERS DE IMPORTACIÓN (PDF · DXF · SVG)
+   Unidades y escala, PDF vectorial (getOperatorList) y raster de respaldo,
+   DXF por capas y SVG → piezas con contornos y capas.
+   ═══════════════════════════════════════════════════════════════════════════ */
 function _parseUnit(str) {
   if (!str) return {
     v: 0,
@@ -10568,6 +10635,11 @@ function parseSVG(svgText, userScale) {
     ignoredAnnot: _ignoredAnnot
   };
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §7 · MOTOR DE NESTING (máscaras · colocación · NFP)
+   Rasterizado a máscara, motor Grid (nestPieces), redes anti-solape, empaque
+   skyline/shelf, gate de complejidad y motor NFP (nestPiecesNFP / agrupado).
+   ═══════════════════════════════════════════════════════════════════════════ */
 const GRID_CELL = 50;
 const FINE_RES = 5;
 const SNAP = GRID_CELL / FINE_RES;
@@ -11604,6 +11676,11 @@ async function nestGroupedByOrder(srcList, plateW, plateH, gap, onProgress) {
    __rk (sello previo) que el motor propaga vía {...src}; si falta, ABORTA a nesting
    normal (a prueba de duplicados). Sólo se activa con el motor NFP (la ruta grid no
    expande quantity igual). Resultado: array de hojas, las de retal con _retal/_binW/_binH. */
+/* ═══════════════════════════════════════════════════════════════════════════
+   §8 · RETALES Y SOBRANTES
+   Nesting reutilizando retales, filtrado por material/grosor, consumo de los
+   usados y cálculo de sobrantes. (RETALES_ENABLED controla si se usa.)
+   ═══════════════════════════════════════════════════════════════════════════ */
 async function nestWithRetales(srcList, plateW, plateH, gap, onProgress, retales) {
   const engine = chooseNest();
   const nfpActive = typeof window !== 'undefined' && !!window.RotulaNFP &&
@@ -11732,6 +11809,11 @@ function computeLeftovers(nestResult, plateW, plateH, matName, thkVal, opt) {
   return out;
 }
 /* Dimensiones de dibujo de la hoja activa: retal -> su tamaño; placa -> tamaño placa. */
+/* ═══════════════════════════════════════════════════════════════════════════
+   §9 · VISTA, MUESTREO Y GEOMETRÍA DE EXPORTACIÓN
+   Encuadre del lienzo y rejilla, aplanado de paths a polilíneas en mm (con
+   caché y tope de muestras) y extracción de geometría por hoja/capa.
+   ═══════════════════════════════════════════════════════════════════════════ */
 function _activeDisp(nestResult, activeSheet, plateW, plateH) {
   const s = nestResult && nestResult[activeSheet];
   return s && s._retal ? { w: s._binW, h: s._binH } : { w: plateW, h: plateH };
@@ -12086,6 +12168,11 @@ function ptsToD(pts) {
   if (closed) d += "Z";
   return d;
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §10 · EXPORTADORES: DXF · SVG · PDF Y DESCARGA
+   Escritores de DXF R12 y SVG plano por capas, PDF de vista previa a escala
+   real (escritor propio) y utilidad de descarga de ficheros.
+   ═══════════════════════════════════════════════════════════════════════════ */
 function buildDXF(sheet, plateW, plateH, sheetIndex, capas) {
   capas = capas && capas.length ? capas : CAPAS_INIT;
   const geo = extractSheetGeometry(sheet, capas);
@@ -12415,6 +12502,10 @@ function downloadFile(filename, content, mime) {
     URL.revokeObjectURL(url);
   }, 100);
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §11 · PERSISTENCIA (localStorage) Y UTILIDADES
+   Wrapper de localStorage y utilidades geométricas compartidas (GeometryUtil).
+   ═══════════════════════════════════════════════════════════════════════════ */
 const LS = {
   get: (k, def) => {
     try {
@@ -12489,6 +12580,11 @@ const GeometryUtil = function () {
     rotatePolygon
   };
 }();
+/* ═══════════════════════════════════════════════════════════════════════════
+   §12 · EDITOR VECTORIAL: GEOMETRÍA, FUENTES Y HELPERS
+   Modelo de objetos del editor (subpaths locales/mundo), texto a trazos con
+   opentype, conversión pieza↔objeto y construcción de SVG/DXF/PDF del editor.
+   ═══════════════════════════════════════════════════════════════════════════ */
 const ED_FONTS = {
   "Poppins Bold": "https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-Bold.ttf",
   "Poppins": "https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-Regular.ttf",
@@ -13232,6 +13328,11 @@ function useIsNarrow(bp) {
   }, []);
   return n;
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §13 · COMPONENTE: VectorEditor
+   Editor visual sobre las hojas anidadas: arrastre, zoom táctil, edición de
+   polilíneas, capas y exportación desde el lienzo.
+   ═══════════════════════════════════════════════════════════════════════════ */
 function VectorEditor({
   plateW,
   plateH,
@@ -15460,6 +15561,11 @@ function VectorEditor({
     return "Caja: " + b.w.toFixed(1) + " × " + b.h.toFixed(1) + " mm";
   })())))));
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §14 · INTEGRACIÓN Y DATOS DE TALLER
+   Generador de ids, listado de máquinas y panel de retales. (El intake por
+   postMessage/#rotula= y resolveOrder viven dentro de App, en §15.)
+   ═══════════════════════════════════════════════════════════════════════════ */
 let _uidc = 0;
 const mkId = pfx => pfx + Date.now().toString(36) + "-" + (_uidc++).toString(36);
 const MACHINES = ["Fresa Wolfcut Nave A", "Fresa Alarsis Nave A", "Fresa Alarsis Nave B", "L\u00e1ser Nave B", "L\u00e1ser Nave C", "Fresa Nave D"];
@@ -15520,6 +15626,12 @@ function RetalesPanel({ materials, retales, saveRetales, newRetal, setNewRetal, 
               h("button", { onClick: () => bump(r.id, 1), style: _rbtn }, "+")),
             h("button", { onClick: () => del(r.id), style: { padding: "5px 10px", background: "#fff", color: "#c0392b", border: "1px solid #f0d0cc", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "inherit" } }, "Borrar")))));
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §15 · COMPONENTE PRINCIPAL: App
+   Estado global y orquestación: importación, nesting, editor, capas, resumen
+   de material, exportación e INTAKE multi-pedido (postMessage / #rotula= / id
+   por BD vía resolveOrder → API_BASE). Es el componente más grande del archivo.
+   ═══════════════════════════════════════════════════════════════════════════ */
 function App() {
   const [tab, setTab] = useState("nesting");
   const [editorInbox, setEditorInbox] = useState(null);
@@ -18029,6 +18141,11 @@ function App() {
     }
   }, "\u26A0 ClipperLib no carg\xF3: los offsets interiores est\xE1n desactivados. Se necesita conexi\xF3n a internet al abrir la app (cdnjs/unpkg).")))));
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §16 · COMPONENTES DE UI REUTILIZABLES
+   Piezas pequeñas de interfaz: Cfg/CfgNum, Btn, IconBtn, Stat, MetaItem,
+   PieceCard, CapaEditorModal, MiniInput, PasteBox.
+   ═══════════════════════════════════════════════════════════════════════════ */
 function CfgNum({
   label,
   value,
@@ -18791,6 +18908,9 @@ function PasteBox({
     onClick: onCancel
   }, "Cancelar")));
 }
+/* ═══════════════════════════════════════════════════════════════════════════
+   §17 · MONTAJE EN EL DOM
+   ═══════════════════════════════════════════════════════════════════════════ */
 ReactDOM.render(React.createElement(App, null), document.getElementById("root"));
 </script>
 <!-- El panel de pedidos (iframe Wolfcut) se ha extraido en esta version SOLO NESTING.
