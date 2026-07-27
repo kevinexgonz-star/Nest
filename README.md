@@ -1,4 +1,4 @@
-# K-nest
+# Rotula-nest
 
 Software web de nesting 2D para optimización de corte CNC. Archivos *standalone* — funcionan directamente en el navegador, sin servidor ni npm.
 
@@ -6,7 +6,7 @@ Software web de nesting 2D para optimización de corte CNC. Archivos *standalone
 
 | Archivo | Qué es | Cuándo usarlo |
 |---------|--------|----------------|
-| **`rotula-nest-demo.html`** | Demo completa: **panel de pedidos** (Wolfcut) **+ nesting**. Arranca en el panel de pedidos; al enviar, pasa a la herramienta de nesting. | Ver el flujo completo pedidos → nesting → producción. |
+| **`rotula-nest-demo.html`** | Demo completa: **panel de pedidos** **+ nesting**. Arranca en el panel de pedidos; al enviar, pasa a la herramienta de nesting. | Ver el flujo completo pedidos → nesting → producción. |
 | **`rotula-nest.html`** | **Solo el panel de nesting**, ya extraído del panel de pedidos y listo para integrar. | Embeber el motor de nesting en otro sistema (ERP, panel propio…). |
 | `archive/` | Versiones anteriores (`rotula-nest-demo-3` … `-11`). | Referencia histórica. |
 | `backend/` | API PHP + esquema MySQL para servir pedidos **por id** desde una base de datos. | Integrar el nesting con una BD (ver más abajo). |
