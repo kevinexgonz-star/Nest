@@ -74,6 +74,10 @@ La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQ
     la placa, se baja al multiplicador que sí cabe y se avisa. El ajuste manual del modal
     de importación sigue teniendo la última palabra.
 - Editor visual con arrastre, zoom táctil y edición de polilíneas.
+- **Selección por rectángulo al estilo CAD (VCarve)**: arrastrar hacia la *derecha* selecciona
+  solo lo que queda entero dentro (ventana, línea continua); hacia la *izquierda*, todo lo que
+  el rectángulo toque (cruce, línea discontinua). El cruce se calcula contra la geometría real,
+  no contra la caja envolvente.
 - Capas de corte: Corte / Hendido / Cajeado (con offset) / Taladros / personalizadas.
 - Detección automática de capas por color al importar.
 - Identificación de pedidos en la placa **por color**: cada pieza se rellena del color de su

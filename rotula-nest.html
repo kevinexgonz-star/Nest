@@ -1,7 +1,18 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v97 — Nesting · Editor · Capas                  ║
+     ║  ROTULA NEST v98 — Nesting · Editor · Capas                  ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v98: SELECCION POR RECTANGULO AL ESTILO CAD (VCarve). El    ║
+     ║  sentido del arrastre elige la regla: hacia la DERECHA es    ║
+     ║  ventana —solo lo que quede entero dentro—; hacia la         ║
+     ║  IZQUIERDA es cruce —todo lo que el rectangulo toque, aunque ║
+     ║  asome—. El cruce se resuelve contra la GEOMETRIA real, no   ║
+     ║  contra la caja: en una placa de letras las cajas se pisan   ║
+     ║  mucho (una "A", una "V" o una "/" dejan esquinas vacias     ║
+     ║  enormes) y por caja un cruce pequeno seleccionaria media    ║
+     ║  placa. El rectangulo cambia de aspecto mientras arrastras   ║
+     ║  —continuo para ventana, discontinuo y de otro color para    ║
+     ║  cruce— y la barra inferior dice que regla se aplica.        ║
      ║  v97: IMPORTACION PDF/AI — tres fallos al leer el archivo.   ║
      ║  (1) Un solo operador de relleno de Illustrator pinta TODAS  ║
      ║  las letras de un rotulo como subtrazos del mismo trazado, y ║
@@ -13028,6 +13039,47 @@ function localBBox(o) {
 function worldAABB(o) {
   return boundsOf(worldSubpaths(o));
 }
+/* ── v98: SELECCIÓN POR RECTÁNGULO AL ESTILO CAD (VCarve/AutoCAD) ─────────────────
+   El SENTIDO del arrastre decide la regla:
+     · izquierda → derecha = VENTANA: solo lo que queda ENTERO dentro del rectángulo.
+       Basta comparar cajas: si la caja cabe, la geometría cabe.
+     · derecha → izquierda = CRUCE: todo lo que el rectángulo TOCA, aunque asome.
+   El cruce se resuelve contra la GEOMETRÍA real, no contra la caja. En una placa de
+   letras las cajas se pisan muchísimo —una "A", una "/" o una "V" dejan esquinas vacías
+   enormes— y por caja un cruce pequeño seleccionaría media placa. */
+function _segInter(p1, p2, p3, p4) {
+  const d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+  if (Math.abs(d) < 1e-12) return false; // paralelos (el caso colineal ya lo cubren los vértices)
+  const t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
+  const u = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+}
+function objTouchesRect(o, r) {
+  const b = worldAABB(o);
+  if (b.maxX < r.x0 || b.minX > r.x1 || b.maxY < r.y0 || b.minY > r.y1) return false; // ni se rozan
+  const subs = worldSubpaths(o);
+  // (a) algún punto del objeto cae dentro del rectángulo
+  for (const s of subs) for (const p of s) {
+    if (p.x >= r.x0 && p.x <= r.x1 && p.y >= r.y0 && p.y <= r.y1) return true;
+  }
+  // (b) algún tramo del objeto cruza un lado del rectángulo
+  const c = [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }];
+  for (const s of subs) for (let k = 0; k < s.length - 1; k++) {
+    for (let e = 0; e < 4; e++) if (_segInter(s[k], s[k + 1], c[e], c[(e + 1) % 4])) return true;
+  }
+  // (c) el rectángulo cae ENTERO dentro del objeto (pieza grande, arrastre pequeño)
+  for (const s of subs) if (s.length > 3 && GeometryUtil.pointInPolygon(c[0], s)) return true;
+  return false;
+}
+function marqueeHits(objects, r, cross) {
+  return (objects || []).filter(o => {
+    if (!cross) {
+      const b = worldAABB(o);
+      return b.minX >= r.x0 && b.maxX <= r.x1 && b.minY >= r.y0 && b.maxY <= r.y1;
+    }
+    return objTouchesRect(o, r);
+  }).map(o => o.id);
+}
 function distToSeg(p, a, b) {
   const dx = b.x - a.x,
     dy = b.y - a.y,
@@ -14496,14 +14548,16 @@ function VectorEditor({
       }
       commitObj(o);
     } else if (d.mode === "marquee" && marquee) {
-      const x0 = Math.min(marquee.x0, marquee.x1),
-        x1 = Math.max(marquee.x0, marquee.x1);
-      const y0 = Math.min(marquee.y0, marquee.y1),
-        y1 = Math.max(marquee.y0, marquee.y1);
-      const hits = objects.filter(o => {
-        const b = worldAABB(o);
-        return b.minX >= x0 && b.maxX <= x1 && b.minY >= y0 && b.maxY <= y1;
-      }).map(o => o.id);
+      /* v98: el sentido del arrastre elige la regla (VCarve/AutoCAD): hacia la izquierda
+         = CRUCE (todo lo que toque), hacia la derecha = VENTANA (solo lo que encierre). */
+      const cross = marquee.x1 < marquee.x0;
+      const r = {
+        x0: Math.min(marquee.x0, marquee.x1),
+        x1: Math.max(marquee.x0, marquee.x1),
+        y0: Math.min(marquee.y0, marquee.y1),
+        y1: Math.max(marquee.y0, marquee.y1)
+      };
+      const hits = marqueeHits(objects, r, cross);
       setMarquee(null);
       if (hits.length) setSel(s => e.shiftKey ? Array.from(new Set([...s, ...hits])) : hits);
     }
@@ -15444,15 +15498,19 @@ function VectorEditor({
     fill: "#fff",
     stroke: "#9333ea",
     strokeWidth: 1.2 * mmPerPx
-  }))), marquee && React.createElement("rect", {
+  }))),
+  /* v98: el rectángulo dice en qué modo estás, como en el CAD — VENTANA (hacia la derecha)
+     con línea continua, CRUCE (hacia la izquierda) con línea discontinua y otro color. Se
+     recalcula mientras arrastras, así que cruzar el punto de partida cambia el aspecto. */
+  marquee && React.createElement("rect", {
     x: Math.min(marquee.x0, marquee.x1),
     y: Math.min(marquee.y0, marquee.y1),
     width: Math.abs(marquee.x1 - marquee.x0),
     height: Math.abs(marquee.y1 - marquee.y0),
-    fill: "rgba(230,0,126,0.06)",
-    stroke: "#E6007E",
+    fill: marquee.x1 < marquee.x0 ? "rgba(13,148,136,0.10)" : "rgba(230,0,126,0.06)",
+    stroke: marquee.x1 < marquee.x0 ? "#0d9488" : "#E6007E",
     strokeWidth: 1 * mmPerPx,
-    strokeDasharray: 3 * mmPerPx + " " + 2 * mmPerPx
+    strokeDasharray: marquee.x1 < marquee.x0 ? 3 * mmPerPx + " " + 2 * mmPerPx : "none"
   }), selectionUI),
   /* v96: LISTA DE REFERENCIAS bajo la placa — la misma que imprime el PDF de vista previa.
      Cada pieza va rellena del color de su pedido y aquí se lee la correspondencia una sola
@@ -15520,7 +15578,11 @@ function VectorEditor({
       borderRadius: 6,
       pointerEvents: "none"
     }
-  }, "X ", cur.x.toFixed(0), " \xB7 Y ", cur.y.toFixed(0), " mm \xB7 placa ", plateW, "\xD7", plateH, " \xB7 ", (1 / mmPerPx).toFixed(2), " px/mm"), tool === "line" && React.createElement("div", {
+  }, marquee
+    // v98: mientras se arrastra el recuadro, la barra dice qué regla se está aplicando.
+    ? React.createElement("span", { style: { color: marquee.x1 < marquee.x0 ? "#0d9488" : "#E6007E", fontWeight: 700 } },
+        marquee.x1 < marquee.x0 ? "Selecci\xF3n por CRUCE \xB7 todo lo que toque el recuadro" : "Selecci\xF3n por VENTANA \xB7 solo lo que quede entero dentro")
+    : ["X ", cur.x.toFixed(0), " \xB7 Y ", cur.y.toFixed(0), " mm \xB7 placa ", plateW, "\xD7", plateH, " \xB7 ", (1 / mmPerPx).toFixed(2), " px/mm"]), tool === "line" && React.createElement("div", {
     style: {
       position: "absolute",
       right: 10,
@@ -15623,7 +15685,14 @@ function VectorEditor({
       marginTop: 8,
       color: "#999"
     }
-  }, "Atajos: V/R/C/P/L/T \xB7 Supr borra \xB7 Ctrl+D duplica \xB7 rueda zoom \xB7 barra espaciadora + arrastrar = mover lienzo.")), selObjs.length > 1 && React.createElement("div", {
+  }, "Atajos: V/R/C/P/L/T \xB7 Supr borra \xB7 Ctrl+D duplica \xB7 rueda zoom \xB7 barra espaciadora + arrastrar = mover lienzo."),
+  /* v98: la regla del rectángulo es invisible si no se cuenta; va junto a los atajos. */
+  React.createElement("div", {
+    style: {
+      marginTop: 6,
+      color: "#999"
+    }
+  }, "Recuadro de selecci\xF3n: arrastrar hacia la ", React.createElement("b", null, "derecha"), " selecciona solo lo que quede ", React.createElement("b", null, "entero dentro"), "; hacia la ", React.createElement("b", null, "izquierda"), ", todo lo que el recuadro ", React.createElement("b", null, "toque"), ".")), selObjs.length > 1 && React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -17455,7 +17524,7 @@ function App() {
     style: {
       color: "#E6007E"
     }
-  }, "v97"))))), tab === "nesting" && React.createElement("div", {
+  }, "v98"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",
