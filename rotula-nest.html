@@ -1,7 +1,23 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v96 — Nesting · Editor · Capas                  ║
+     ║  ROTULA NEST v97 — Nesting · Editor · Capas                  ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v97: IMPORTACION PDF/AI — tres fallos al leer el archivo.   ║
+     ║  (1) Un solo operador de relleno de Illustrator pinta TODAS  ║
+     ║  las letras de un rotulo como subtrazos del mismo trazado, y ║
+     ║  el rotulo entraba como UNA pieza (1200x121 mm) que el       ║
+     ║  nesting no podia colocar. Ahora los subtrazos se reparten   ║
+     ║  en piezas por contencion: los huecos (la "a", la "O") van   ║
+     ║  con su letra y cada letra suelta es una pieza. (2) La misma ║
+     ║  pieza se emitia DOS veces —una por el relleno y otra por el ║
+     ║  contorno del mismo dibujo— y se cortaba el doble: 210       ║
+     ║  letras donde el archivo trae 107. Se unifica la forma de    ║
+     ║  cada subtrazo (Illustrator cierra de dos modos distintos) y ║
+     ║  se descarta el trazado repetido. (3) Guarda de escala: la   ║
+     ║  unidad recordada (cm) daba pliegos de 12 y 29 m, imposibles ║
+     ║  de cortar; si con la unidad elegida el documento no cabe en ║
+     ║  la placa se baja al multiplicador que si cabe, y se avisa.  ║
+     ║  El ajuste manual del modal (userScale) sigue mandando.      ║
      ║  v96: IDENTIFICAR POR COLOR, REFERENCIAS DEBAJO. Rotular la  ║
      ║  referencia ENCIMA de cada pieza solo se aguanta con pocas   ║
      ║  piezas: en un lote grande la placa se convertia en una      ║
@@ -9480,7 +9496,94 @@ const PDF_UNITS = [
   { id: 'm', label: 'Metros (escala 1:100)', mul: 1000 }
 ];
 const pdfUnitMul = u => { const f = PDF_UNITS.find(x => x.id === u); return f ? f.mul : 1; };
-async function parsePDFVector(arrayBuffer, userScale, unitMul) {
+/* v97: GUARDA DE ESCALA — nunca dejar entrar un pliego IMPOSIBLE de cortar.
+   La unidad de dibujo no se puede deducir del archivo con certeza (un PDF de Illustrator
+   no dice si sus cifras son mm reales o cm a escala 1:10), así que se recuerda la última
+   elección… y una elección equivocada entraba EN SILENCIO: un PDF de letras a tamaño real
+   leído como "cm" daba un pliego de 12 m, las piezas salían 10× y el nesting no colocaba
+   nada. La guarda no adivina hacia arriba: solo REDUCE el multiplicador elegido cuando con
+   él el documento no cabe en la placa y con uno menor sí. Si ninguno cabe se queda el
+   tamaño real 1:1, que es la lectura literal del archivo. Con userScale (ajuste manual del
+   modal) no actúa: ahí manda el usuario. */
+function pdfFitUnitMul(mul, docW, docH, fitW, fitH) {
+  const req = mul > 0 ? mul : 1;
+  if (!(docW > 0) || !(docH > 0) || !(fitW > 0) || !(fitH > 0)) return req;
+  const cabe = m => {
+    const w = docW * m,
+      h = docH * m;
+    return w <= fitW && h <= fitH || w <= fitH && h <= fitW; // la placa se puede girar
+  };
+  if (cabe(req)) return req;
+  const menores = PDF_UNITS.map(u => u.mul).filter(m => m < req).sort((a, b) => b - a);
+  for (const m of menores) if (cabe(m)) return m;
+  return 1;
+}
+function _pointInPoly(pt, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    if (yi > pt.y !== yj > pt.y && pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+/* v97: un solo operador de relleno de Illustrator puede pintar TODAS las letras de un
+   rótulo como subtrazos del mismo trazado compuesto. Emitidas como una sola parte, el
+   rótulo entero entraba como UNA pieza (p.ej. 1200×121 mm de "letras") que el nesting no
+   podía colocar ni repartir. Se reparten los subtrazos en piezas por CONTENCIÓN: el que
+   está dentro de otro es su contorno interior (el hueco de una "O", la barra de una "A")
+   y viaja con él; los disjuntos son piezas distintas. Misma regla que agrupa después las
+   partes entre sí, aplicada un nivel más abajo. */
+function splitCompoundSubpaths(subs) {
+  const n = subs.length;
+  if (n < 2) return [subs];
+  const SAMP = (pts, maxN) => {
+    if (pts.length <= maxN) return pts;
+    const out = [], step = pts.length / maxN;
+    for (let k = 0; k < maxN; k++) out.push(pts[Math.floor(k * step)]);
+    return out;
+  };
+  const inf = subs.map(s => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of s.pts) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    return {
+      minX, minY, maxX, maxY,
+      a: Math.max(0, maxX - minX) * Math.max(0, maxY - minY),
+      // solo un subtrazo CERRADO puede contener a otro
+      poly: s.closed && s.pts.length >= 4 ? SAMP(s.pts, 96) : null,
+      probe: SAMP(s.pts, 6)
+    };
+  });
+  const ord = inf.map((_, i) => i).sort((x, y) => inf[y].a - inf[x].a); // contenedores primero
+  const E = 0.05;
+  const parent = new Array(n).fill(-1);
+  for (let oi = 1; oi < ord.length; oi++) {
+    const i = ord[oi], bi = inf[i];
+    let best = -1, bestA = Infinity;
+    for (let oj = 0; oj < oi; oj++) {
+      const j = ord[oj], bj = inf[j];
+      if (!bj.poly || bj.a >= bestA) continue; // busca el contenedor MÁS AJUSTADO
+      if (!(bi.minX >= bj.minX - E && bi.minY >= bj.minY - E && bi.maxX <= bj.maxX + E && bi.maxY <= bj.maxY + E)) continue;
+      let inside = 0;
+      for (const p of bi.probe) if (_pointInPoly(p, bj.poly)) inside++;
+      if (inside >= Math.ceil(bi.probe.length * 0.7)) { best = j; bestA = bj.a; }
+    }
+    parent[i] = best;
+  }
+  const rootOf = i => { let k = i, g = 0; while (parent[k] >= 0 && g++ < n) k = parent[k]; return k; };
+  const byRoot = new Map();
+  for (let i = 0; i < n; i++) {
+    const r = rootOf(i);
+    if (!byRoot.has(r)) byRoot.set(r, []);
+    byRoot.get(r).push(subs[i]);
+  }
+  return [...byRoot.values()];
+}
+async function parsePDFVector(arrayBuffer, userScale, unitMul, fit) {
   await ensurePdfJs();
   const pdf = await pdfjsLib.getDocument({
     data: arrayBuffer.slice(0)
@@ -9499,9 +9602,21 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul) {
   // unitMul reinterpreta la unidad del dibujo: cm → ×10, m → ×1000 (para PDF a escala,
   // p.ej. dibujado en mm pero cuyas cifras representan cm). userScale (si se indica) es
   // el valor absoluto mm/unidad y manda sobre todo lo demás.
-  const K = (userScale && userScale > 0 ? userScale : 25.4 / 72) * (unitMul > 0 ? unitMul : 1);
+  const _base = userScale && userScale > 0 ? userScale : 25.4 / 72;
+  /* v97: tamaño físico del documento a 1:1 (mm) ANTES de leer la geometría — es lo que
+     necesita la guarda de escala, y sale gratis del viewport de cada página. */
+  let _d1W = 0, _d1H = 0;
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const vp0 = (await pdf.getPage(n)).getViewport({ scale: _base });
+    _d1W = Math.max(_d1W, vp0.width);
+    _d1H = Math.max(_d1H, vp0.height);
+  }
+  const _umReq = unitMul > 0 ? unitMul : 1;
+  const _um = userScale && userScale > 0 ? 1 : pdfFitUnitMul(_umReq, _d1W, _d1H, fit && fit.w, fit && fit.h);
+  const K = _base * _um;
   const svgParts = [];
   const _dropAnnot = {}, _keptUnknown = {}, _orphanDrop = {}; // v81: contadores para avisos
+  const _dupDrop = { n: 0 }; // v97: trazados repetidos (relleno+contorno del mismo dibujo)
   /* v81: ¿el archivo lleva datos nativos de Illustrator? Si los lleva y la capa PDF
      apenas contiene diseño, el .ai se guardó mal (arte solo en el formato nativo). */
   const _aiPriv = (() => { try {
@@ -9619,6 +9734,29 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul) {
             }
         }
       }
+      /* v97: forma CANÓNICA de cada subtrazo. Illustrator escribe el mismo contorno de dos
+         maneras según lo pinte relleno o contorneado —uno cierra con `h` y el otro añade
+         una línea explícita al punto inicial y luego `h`—, así que salían dos geometrías
+         distintas para el mismo dibujo: no se reconocían como repetidas y, peor, la versión
+         de relleno quedaba marcada como ABIERTA y entonces no podía adoptar sus contornos
+         interiores (los huecos de la "a", la "b" o la "g" se soltaban como piezas sueltas).
+         Se quitan los puntos consecutivos repetidos y se unifica el criterio: cerrado ⇔ el
+         último punto coincide con el primero (que es lo que espera isClosedPts). */
+      for (const s of subs) {
+        const p = s.pts;
+        if (!p || p.length < 2) continue;
+        let w = 1;
+        for (let i = 1; i < p.length; i++) {
+          const q = p[w - 1];
+          if (Math.abs(p[i].x - q.x) < 1e-6 && Math.abs(p[i].y - q.y) < 1e-6) continue;
+          p[w++] = p[i];
+        }
+        p.length = w;
+        const a = p[0], b = p[p.length - 1];
+        if (p.length > 2 && Math.abs(a.x - b.x) < 1e-6 && Math.abs(a.y - b.y) < 1e-6) s.closed = true;
+        else if (s.closed && p.length > 2) p.push({ x: a.x, y: a.y });
+        else s.closed = false;
+      }
       return subs;
     };
     const rgbStr = a => a ? "rgb(" + a[0] + "," + a[1] + "," + a[2] + ")" : null;
@@ -9626,7 +9764,13 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul) {
       const v = Math.round((a && a[0] != null ? +a[0] : 0) * 255);
       return "rgb(" + v + "," + v + "," + v + ")";
     };
-    const emit = (subs, colStr) => {
+    /* v97: geometría ya emitida en esta página. Illustrator escribe muchas piezas DOS veces
+       —una para el relleno y otra para el contorno del mismo trazado— y cada pasada entraba
+       como una pieza más: el operario recibía 210 letras donde el archivo trae 107 y se
+       cortaba el doble de material. Dos trazados con las MISMAS coordenadas absolutas están
+       uno encima del otro, así que son la misma pieza física, no dos. */
+    const _seenD = new Set();
+    const emitPart = (subs, colStr) => {
       if (!subs || !subs.length) return;
       let d = "",
         minX = Infinity,
@@ -9634,16 +9778,29 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul) {
         maxX = -Infinity,
         maxY = -Infinity,
         nPts = 0;
+      /* Clave NORMALIZADA para detectar el mismo trazado emitido dos veces: la pasada de
+         relleno y la de contorno del mismo dibujo no dan una `d` idéntica (una cierra con
+         `h` y la otra repite además el punto inicial), así que se comparan las coordenadas
+         redondeadas a 0,01 mm sin puntos consecutivos repetidos ni el cierre. */
+      const _kp = [];
       for (const s of subs) {
         if (s.pts.length < 2) continue;
         d += "M" + s.pts.map(p => p.x.toFixed(3) + " " + p.y.toFixed(3)).join("L") + (s.closed ? "Z" : "");
+        const k = [];
+        let px = null, py = null;
         for (const p of s.pts) {
           minX = Math.min(minX, p.x);
           minY = Math.min(minY, p.y);
           maxX = Math.max(maxX, p.x);
           maxY = Math.max(maxY, p.y);
           nPts++;
+          const kx = Math.round(p.x * 100), ky = Math.round(p.y * 100);
+          if (kx === px && ky === py) continue;
+          k.push(kx + "," + ky);
+          px = kx; py = ky;
         }
+        if (k.length > 1 && k[0] === k[k.length - 1]) k.pop(); // cierre implícito o explícito
+        _kp.push(k.join(" "));
       }
       if (!nPts || maxX - minX < 0.05 && maxY - minY < 0.05) return;
       /* v94: los PDF de producción traen SOLO geometría de CORTE, así que toda parte de un
@@ -9662,6 +9819,10 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul) {
         // Capas de corte declaradas (CAJEADO/HENDIDO/AGUJEROS) conservan su semántica.
         if (cl.isCut) capa = cl.capa;else _keptUnknown[_lname] = (_keptUnknown[_lname] || 0) + 1;
       }
+      // v97: mismo trazado ya emitido en esta página (relleno + contorno) → una sola pieza.
+      const _dk = capa + '|' + _kp.join(';');
+      if (_seenD.has(_dk)) { _dupDrop.n++; return; }
+      _seenD.add(_dk);
       // Muestreo geométrico para agrupación REAL (no solo bbox):
       //  · probe: puntos de muestra de toda la parte (≤24) → test punto-en-polígono contra el padre.
       //  · outer: subtrazo CERRADO de mayor área (≤96 pts) → polígono contenedor de esta parte.
@@ -9699,6 +9860,13 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul) {
         probe: _probe,
         outer: _outer
       });
+    };
+    /* v97: cada operador de pintado se reparte en piezas antes de emitirse. Illustrator
+       mete todas las letras de un rótulo en un único trazado compuesto; sin este reparto
+       el rótulo entero era una sola pieza y no se podía anidar. */
+    const emit = (subs, colStr) => {
+      if (!subs || !subs.length) return;
+      for (const g of splitCompoundSubpaths(subs)) emitPart(g, colStr);
     };
     for (let i = 0; i < ol.fnArray.length; i++) {
       const fn = ol.fnArray[i],
@@ -9778,7 +9946,9 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul) {
     scale: K,
     unit: 'pt→mm (vectorial)',
     docW,
-    docH
+    docH,
+    unitMul: _um,
+    unitMulReq: _umReq
   };
   const EPS = 0.5;
   /* ── AGRUPACIÓN GEOMÉTRICA (v79) ─────────────────────────────────────────────
@@ -9943,13 +10113,18 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul) {
     unit: 'pt→mm (vectorial)',
     docW,
     docH,
+    unitMul: _um,
+    unitMulReq: _umReq,
     warnings: { keptUnknown: _keptUnknown, dropAnnot: _dropAnnot, orphanDrop: _orphanDrop,
-      sparseDoc: _sparseDoc, pieceAreaPct: _docArea > 0 ? Math.round(1000 * _pieceArea / _docArea) / 10 : null } // v81
+      sparseDoc: _sparseDoc, pieceAreaPct: _docArea > 0 ? Math.round(1000 * _pieceArea / _docArea) / 10 : null,
+      // v97: la unidad elegida daba un pliego que no cabe en la placa → se redujo
+      scaleFit: _um !== _umReq ? { de: _umReq, a: _um, docW: Math.round(docW), docH: Math.round(docH) } : null,
+      dupDrop: _dupDrop.n || 0 } // v97: trazados repetidos descartados
   };
 }
-async function parsePDF(arrayBuffer, userScale, unitMul) {
+async function parsePDF(arrayBuffer, userScale, unitMul, fit) {
   try {
-    const v = await parsePDFVector(arrayBuffer, userScale, unitMul);
+    const v = await parsePDFVector(arrayBuffer, userScale, unitMul, fit);
     if (v && v.pieces.length) return v;
     console.warn("PDF sin trazados vectoriales → fallback raster");
   } catch (e) {
@@ -9957,9 +10132,9 @@ async function parsePDF(arrayBuffer, userScale, unitMul) {
   } finally {
     reportProgress(null);
   }
-  return parsePDFRaster(arrayBuffer.slice(0), userScale, unitMul);
+  return parsePDFRaster(arrayBuffer.slice(0), userScale, unitMul, fit);
 }
-async function parsePDFRaster(arrayBuffer, userScale, unitMul) {
+async function parsePDFRaster(arrayBuffer, userScale, unitMul, fit) {
   const _um = unitMul > 0 ? unitMul : 1;
   await ensurePdfJs();
   const pdf = await pdfjsLib.getDocument({
@@ -16097,8 +16272,19 @@ function App() {
           isPdf,
           isDxf
         });
-        // Escala inicial: para PDF/AI aplica la unidad recordada (mm/cm/m); resto 1:1.
-        setImportScale(result.scale * (isPdf ? pdfUnitMul(importUnit) : 1));
+        /* Escala inicial: para PDF/AI aplica la unidad recordada (mm/cm/m); resto 1:1.
+           v97: la unidad recordada pasa por la guarda de escala — si con ella el pliego no
+           cabe en la placa, el modal arranca ya con la unidad que sí cabe (y deja el
+           desplegable en esa unidad) en vez de abrir con unas medidas imposibles. */
+        let _mul = 1;
+        if (isPdf) {
+          _mul = pdfFitUnitMul(pdfUnitMul(importUnit), result.docW, result.docH, plateW, plateH);
+          if (_mul !== pdfUnitMul(importUnit)) {
+            const u = PDF_UNITS.find(x => x.mul === _mul);
+            if (u) saveImportUnit(u.id);
+          }
+        }
+        setImportScale(result.scale * _mul);
         reportProgress(null);
         return result.pieces.length;
       }
@@ -16162,7 +16348,7 @@ function App() {
   const parseOne = async (data, name) => {
     const n = name.toLowerCase();
     // Importación múltiple (arrastre): aplica la unidad de dibujo recordada a los PDF/AI.
-    if (n.endsWith(".pdf") || n.endsWith(".ai")) return await parsePDF(data, 0, pdfUnitMul(importUnit));
+    if (n.endsWith(".pdf") || n.endsWith(".ai")) return await parsePDF(data, 0, pdfUnitMul(importUnit), { w: plateW, h: plateH });
     if (n.endsWith(".dxf")) return parseDXF(data);
     return parseSVG(data);
   };
@@ -16190,6 +16376,11 @@ function App() {
           if (Object.keys(w.keptUnknown || {}).length) msgs.push('capas no estándar conservadas como corte: ' + _fmt(w.keptUnknown));
           if (nOrf > 0) msgs.push(nOrf + ' taladro(s)/hendido(s) sin pieza de corte asociada → ignorados' + (nOrf > 20 ? '. El archivo puede no traer el diseño completo en su capa PDF: reexporta como PDF desde Illustrator con todas las capas visibles e imprimibles' : ''));
           if (w.sparseDoc) msgs.push('el diseño legible ocupa solo el ' + w.pieceAreaPct + '% del pliego y el .ai contiene datos nativos de Illustrator que Rotula no puede leer. Si faltan piezas: reexporta como PDF (Archivo → Guardar como → PDF) con todas las capas visibles e imprimibles');
+          // v97: la unidad recordada daba un pliego que no cabía en la placa → se corrigió
+          if (w.scaleFit) {
+            const _un = m => (PDF_UNITS.find(x => x.mul === m) || {}).label || ('×' + m);
+            msgs.push('la unidad "' + _un(w.scaleFit.de) + '" daba un pliego imposible de cortar; se ha leído a "' + _un(w.scaleFit.a) + '" → ' + w.scaleFit.docW + '×' + w.scaleFit.docH + ' mm. Cambia la unidad en el modal de importación si no es correcto');
+          }
           if (msgs.length) showToast(f.name + ': ' + msgs.join(' · '), (nOrf > 20 || w.sparseDoc) ? 'error' : undefined);
           try { console.info('[Rotula] ' + f.name + ' → capas:', JSON.stringify(w)); } catch (e) {}
         }
@@ -16652,7 +16843,7 @@ function App() {
       }
       let res = null;
       try {
-        if ((o.fileType || "").toLowerCase() === "svg") res = parseSVG(o.content);else res = await parsePDF(_b64ToBuf(o.content), 0, pdfUnitMul(importUnit));
+        if ((o.fileType || "").toLowerCase() === "svg") res = parseSVG(o.content);else res = await parsePDF(_b64ToBuf(o.content), 0, pdfUnitMul(importUnit), { w: plateW, h: plateH });
       } catch (e) {
         console.error("parse fail", o.ref, e);
       }
@@ -17264,7 +17455,7 @@ function App() {
     style: {
       color: "#E6007E"
     }
-  }, "v96"))))), tab === "nesting" && React.createElement("div", {
+  }, "v97"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",

@@ -66,6 +66,13 @@ La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQ
 
 - Nesting automático de piezas irregulares (algoritmo Grid por defecto y motor NFP/DeepNest opt-in).
 - Importación: SVG, DXF, PDF vectorial, Adobe Illustrator (AI).
+  - Los rótulos que Illustrator escribe como **un solo trazado compuesto** se reparten en
+    una pieza por letra (los huecos de la «a» o la «O» viajan con su letra).
+  - Se descarta el trazado **repetido** cuando el mismo dibujo va pintado en relleno y en
+    contorno: una pieza, no dos.
+  - **Guarda de escala**: si con la unidad de dibujo elegida (mm/cm/m) el pliego no cabe en
+    la placa, se baja al multiplicador que sí cabe y se avisa. El ajuste manual del modal
+    de importación sigue teniendo la última palabra.
 - Editor visual con arrastre, zoom táctil y edición de polilíneas.
 - Capas de corte: Corte / Hendido / Cajeado (con offset) / Taladros / personalizadas.
 - Detección automática de capas por color al importar.
