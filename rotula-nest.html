@@ -1,7 +1,20 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v98 — Nesting · Editor · Capas                  ║
+     ║  ROTULA NEST v99 — Nesting · Editor · Capas                  ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v99: los HUECOS de las letras se soltaban como piezas       ║
+     ║  sueltas. Al rellenar, el PDF cierra implicitamente todo     ║
+     ║  subtrazo que no traiga `h` (spec: «any subpaths that are    ║
+     ║  open shall be implicitly closed before being filled»), y la ║
+     ║  app se fiaba solo del cierre explicito. En un archivo real  ║
+     ║  23 de 43 subtrazos llegaban sin `h`, asi que el contorno de ║
+     ║  la letra quedaba marcado como ABIERTO; un contorno abierto  ║
+     ║  no puede ser padre de nada y el hueco de la "O", la "D" o   ║
+     ║  la "A" se soltaba como pieza aparte y salia a cortar por su ║
+     ║  cuenta. Ahora se cierran al pintar, como manda la spec.     ║
+     ║  Arregla ademas el perfil que se exporta a CNC: 21 contornos ║
+     ║  abiertos en ese archivo, que habrian dejado sus piezas sin  ║
+     ║  cortar.                                                     ║
      ║  v98: SELECCION POR RECTANGULO AL ESTILO CAD (VCarve). El    ║
      ║  sentido del arrastre elige la regla: hacia la DERECHA es    ║
      ║  ventana —solo lo que quede entero dentro—; hacia la         ║
@@ -9544,6 +9557,23 @@ function _pointInPoly(pt, poly) {
    está dentro de otro es su contorno interior (el hueco de una "O", la barra de una "A")
    y viaja con él; los disjuntos son piezas distintas. Misma regla que agrupa después las
    partes entre sí, aplicada un nivel más abajo. */
+/* v99: al RELLENAR, el PDF cierra implícitamente todo subtrazo que no traiga `h` (spec:
+   «any subpaths that are open shall be implicitly closed before being filled»). La app se
+   fiaba solo del cierre explícito, así que el contorno de una letra escrito sin `h` —23 de
+   43 subtrazos en un archivo real— quedaba marcado como ABIERTO. Un contorno abierto no
+   puede ser padre de nada, de modo que el hueco de la "O", la "D" o la "A" se soltaba como
+   pieza aparte y salía a cortar por su cuenta. Cerrarlos aquí arregla de paso el contorno
+   que se exporta a CNC: un perfil abierto deja la pieza sin cortar. */
+function implicitCloseFill(subs) {
+  if (!subs) return subs;
+  for (const s of subs) {
+    if (s.closed || !s.pts || s.pts.length < 3) continue;
+    const a = s.pts[0], b = s.pts[s.pts.length - 1];
+    s.closed = true;
+    if (Math.abs(a.x - b.x) > 1e-6 || Math.abs(a.y - b.y) > 1e-6) s.pts.push({ x: a.x, y: a.y });
+  }
+  return subs;
+}
 function splitCompoundSubpaths(subs) {
   const n = subs.length;
   if (n < 2) return [subs];
@@ -9935,13 +9965,14 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul, fit) {
           break;
         case OPS.fill:
         case OPS.eoFill:
-          emit(pending, fillCol);
+          // v99: rellenar cierra los subtrazos abiertos (spec PDF) → el contorno es cerrado.
+          emit(implicitCloseFill(pending), fillCol);
           pending = null;
           break;
         case OPS.fillStroke:
         case OPS.eoFillStroke:
         case OPS.closeFillStroke:
-          emit(pending, strokeCol || fillCol);
+          emit(implicitCloseFill(pending), strokeCol || fillCol);
           pending = null;
           break;
         case OPS.endPath:
@@ -17524,7 +17555,7 @@ function App() {
     style: {
       color: "#E6007E"
     }
-  }, "v98"))))), tab === "nesting" && React.createElement("div", {
+  }, "v99"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",
