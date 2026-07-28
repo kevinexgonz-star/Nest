@@ -9156,6 +9156,76 @@ function plLen(pts) {
   for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
   return L;
 }
+/* ── Cajas envolventes y agrupación por raíz (utilidades compartidas) ──────────
+   Estas cuatro operaciones estaban copiadas —con nombres distintos y algún matiz
+   suelto— en los parsers de DXF/SVG/PDF y en los empaquetadores: medir la caja de
+   una lista de puntos, unir las cajas de un grupo, comprobar contención/solape y
+   subir por una relación hijo→padre hasta la raíz. Una sola implementación evita
+   que se arreglen bugs en una copia y no en las otras. */
+function pointBounds(points) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of points || []) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+/* Caja {x,y,w,h} de una lista de puntos; null si la lista está vacía. */
+function bboxOfPoints(points) {
+  const b = pointBounds(points);
+  if (b.minX === Infinity) return null;
+  return { x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY };
+}
+/* Muestreo uniforme y determinista de una polilínea a lo sumo `maxPoints` puntos. */
+function samplePolyline(points, maxPoints) {
+  if (points.length <= maxPoints) return points;
+  const out = [], step = points.length / maxPoints;
+  for (let k = 0; k < maxPoints; k++) out.push(points[Math.floor(k * step)]);
+  return out;
+}
+/* Caja mínima que contiene a todas las de la lista (la lista nunca viene vacía). */
+function unionBBoxes(boxes) {
+  let box = { ...boxes[0] };
+  for (let i = 1; i < boxes.length; i++) {
+    const b = boxes[i];
+    const x = Math.min(box.x, b.x), y = Math.min(box.y, b.y);
+    box = {
+      x, y,
+      w: Math.max(box.x + box.w, b.x + b.w) - x,
+      h: Math.max(box.y + box.h, b.y + b.h) - y
+    };
+  }
+  return box;
+}
+/* ¿`inner` cabe dentro de `outer`, admitiendo `tol` de holgura por lado? */
+function bboxContains(outer, inner, tol) {
+  const t = tol || 0;
+  return !!outer && !!inner && inner.x >= outer.x - t && inner.y >= outer.y - t && inner.x + inner.w <= outer.x + outer.w + t && inner.y + inner.h <= outer.y + outer.h + t;
+}
+/* ¿se tocan las dos cajas, dejando `margin` de tolerancia alrededor? */
+function bboxesOverlap(a, b, margin) {
+  const m = margin || 0;
+  return !(a.x + a.w + m < b.x || b.x + b.w + m < a.x || a.y + a.h + m < b.y || b.y + b.h + m < a.y);
+}
+/* Sube por la relación hijo→padre (índice negativo = raíz) hasta la raíz.
+   `maxSteps` es solo una guarda: una relación mal formada no debe colgar la UI. */
+function rootIndexOf(parentOf, index, maxSteps) {
+  let node = index, steps = 0;
+  while (parentOf[node] >= 0 && steps++ < maxSteps) node = parentOf[node];
+  return node;
+}
+/* Agrupa índices por su raíz, conservando el orden de aparición dentro de cada grupo. */
+function groupIndicesByRoot(indices, parentOf, maxSteps) {
+  const byRoot = new Map();
+  for (const i of indices) {
+    const root = rootIndexOf(parentOf, i, maxSteps);
+    if (!byRoot.has(root)) byRoot.set(root, []);
+    byRoot.get(root).push(i);
+  }
+  return byRoot;
+}
 function genDemoPieces() {
   let s = 0x9e3779b9;
   const rnd = () => {
@@ -9513,55 +9583,58 @@ function implicitCloseFill(subs) {
   }
   return subs;
 }
-function splitCompoundSubpaths(subs) {
-  const n = subs.length;
-  if (n < 2) return [subs];
-  const SAMP = (pts, maxN) => {
-    if (pts.length <= maxN) return pts;
-    const out = [], step = pts.length / maxN;
-    for (let k = 0; k < maxN; k++) out.push(pts[Math.floor(k * step)]);
-    return out;
+const SUBPATH_OUTLINE_SAMPLES = 96; // puntos del contorno con los que se prueba la contención
+const SUBPATH_PROBE_SAMPLES = 6; // puntos del contenido que se lanzan contra ese contorno
+const SUBPATH_PROBE_RATIO = 0.7; // fracción de sondas dentro para dar el subtrazo por contenido
+const SUBPATH_BBOX_TOL_MM = 0.05; // holgura de la caja envolvente antes de probar punto a punto
+/* Datos que necesita la prueba de contención, precalculados una vez por subtrazo. */
+function describeSubpathForNesting(sub) {
+  const bounds = pointBounds(sub.pts);
+  return {
+    bounds,
+    area: Math.max(0, bounds.maxX - bounds.minX) * Math.max(0, bounds.maxY - bounds.minY),
+    // solo un subtrazo CERRADO puede contener a otro
+    outline: sub.closed && sub.pts.length >= 4 ? samplePolyline(sub.pts, SUBPATH_OUTLINE_SAMPLES) : null,
+    probes: samplePolyline(sub.pts, SUBPATH_PROBE_SAMPLES)
   };
-  const inf = subs.map(s => {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of s.pts) {
-      if (p.x < minX) minX = p.x;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.y > maxY) maxY = p.y;
+}
+function subpathBoundsInside(inner, outer) {
+  const E = SUBPATH_BBOX_TOL_MM;
+  return inner.minX >= outer.minX - E && inner.minY >= outer.minY - E && inner.maxX <= outer.maxX + E && inner.maxY <= outer.maxY + E;
+}
+function subpathProbesInside(inner, outer) {
+  let hits = 0;
+  for (const p of inner.probes) if (_pointInPoly(p, outer.outline)) hits++;
+  return hits >= Math.ceil(inner.probes.length * SUBPATH_PROBE_RATIO);
+}
+/* Contenedor MÁS AJUSTADO (de menor área) de cada subtrazo; -1 si no está dentro de ninguno.
+   Se recorren de mayor a menor área, así que los candidatos ya vistos son los únicos
+   posibles contenedores y la búsqueda puede cortar en cuanto el área deja de mejorar. */
+function findSubpathContainers(shapes) {
+  const byAreaDesc = shapes.map((_, i) => i).sort((a, b) => shapes[b].area - shapes[a].area);
+  const parentOf = new Array(shapes.length).fill(-1);
+  for (let rank = 1; rank < byAreaDesc.length; rank++) {
+    const inner = shapes[byAreaDesc[rank]];
+    let bestIndex = -1, bestArea = Infinity;
+    for (let outerRank = 0; outerRank < rank; outerRank++) {
+      const outerIndex = byAreaDesc[outerRank], outer = shapes[outerIndex];
+      if (!outer.outline || outer.area >= bestArea) continue;
+      if (!subpathBoundsInside(inner.bounds, outer.bounds)) continue;
+      if (!subpathProbesInside(inner, outer)) continue;
+      bestIndex = outerIndex;
+      bestArea = outer.area;
     }
-    return {
-      minX, minY, maxX, maxY,
-      a: Math.max(0, maxX - minX) * Math.max(0, maxY - minY),
-      // solo un subtrazo CERRADO puede contener a otro
-      poly: s.closed && s.pts.length >= 4 ? SAMP(s.pts, 96) : null,
-      probe: SAMP(s.pts, 6)
-    };
-  });
-  const ord = inf.map((_, i) => i).sort((x, y) => inf[y].a - inf[x].a); // contenedores primero
-  const E = 0.05;
-  const parent = new Array(n).fill(-1);
-  for (let oi = 1; oi < ord.length; oi++) {
-    const i = ord[oi], bi = inf[i];
-    let best = -1, bestA = Infinity;
-    for (let oj = 0; oj < oi; oj++) {
-      const j = ord[oj], bj = inf[j];
-      if (!bj.poly || bj.a >= bestA) continue; // busca el contenedor MÁS AJUSTADO
-      if (!(bi.minX >= bj.minX - E && bi.minY >= bj.minY - E && bi.maxX <= bj.maxX + E && bi.maxY <= bj.maxY + E)) continue;
-      let inside = 0;
-      for (const p of bi.probe) if (_pointInPoly(p, bj.poly)) inside++;
-      if (inside >= Math.ceil(bi.probe.length * 0.7)) { best = j; bestA = bj.a; }
-    }
-    parent[i] = best;
+    parentOf[byAreaDesc[rank]] = bestIndex;
   }
-  const rootOf = i => { let k = i, g = 0; while (parent[k] >= 0 && g++ < n) k = parent[k]; return k; };
-  const byRoot = new Map();
-  for (let i = 0; i < n; i++) {
-    const r = rootOf(i);
-    if (!byRoot.has(r)) byRoot.set(r, []);
-    byRoot.get(r).push(subs[i]);
-  }
-  return [...byRoot.values()];
+  return parentOf;
+}
+function splitCompoundSubpaths(subs) {
+  const total = subs.length;
+  if (total < 2) return [subs];
+  const shapes = subs.map(describeSubpathForNesting);
+  const parentOf = findSubpathContainers(shapes);
+  const allIndices = subs.map((_, i) => i);
+  return [...groupIndicesByRoot(allIndices, parentOf, total).values()].map(group => group.map(i => subs[i]));
 }
 async function parsePDFVector(arrayBuffer, userScale, unitMul, fit) {
   await ensurePdfJs();
@@ -10255,184 +10328,219 @@ async function parsePDFRaster(arrayBuffer, userScale, unitMul, fit) {
     docH: allPieces.reduce((s, p) => Math.max(s, p.h), 0)
   };
 }
-function parseDXF(dxfText, userScale) {
+/* ── Importación DXF ──────────────────────────────────────────────────────────
+   El archivo se lee en cuatro pasos independientes y testeables por separado:
+     1. texto → pares (código, valor)                     readDxfGroupPairs
+     2. pares → entidades de la sección ENTITIES          readDxfEntities
+     3. entidad → trozo de SVG + su caja                  dxfEntityToPart
+     4. trozos que se tocan → piezas                      groupTouchingParts
+   Antes era un solo bloque de 300 líneas con un switch de 130 y dos tablas de
+   unidades escritas a mano (una de ellas muerta). */
+const DXF_UNIT_BY_INSUNITS = { 1: 'in', 2: 'ft', 4: 'mm', 5: 'cm', 6: 'm' };
+const DXF_MM_PER_UNIT = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 };
+function readDxfGroupPairs(dxfText) {
   const lines = dxfText.split(/\r?\n/);
   const pairs = [];
   for (let i = 0; i < lines.length - 1; i += 2) {
-    pairs.push({
-      code: parseInt(lines[i].trim()),
-      value: lines[i + 1].trim()
-    });
+    pairs.push({ code: parseInt(lines[i].trim()), value: lines[i + 1].trim() });
   }
-  let inEntities = false;
+  return { lines, pairs };
+}
+/* Entidades de la sección ENTITIES. Un código que se repite dentro de la misma
+   entidad (los vértices 10/20 de una polilínea) se acumula en un array. */
+function readDxfEntities(pairs) {
   const entities = [];
+  let inEntities = false;
   let current = null;
-  for (const p of pairs) {
-    if (p.code === 0 && p.value === 'SECTION') {
-      continue;
-    }
-    if (p.code === 2 && p.value === 'ENTITIES') {
-      inEntities = true;
-      continue;
-    }
-    if (p.code === 0 && p.value === 'ENDSEC' && inEntities) {
+  for (const pair of pairs) {
+    if (pair.code === 0 && pair.value === 'SECTION') continue;
+    if (pair.code === 2 && pair.value === 'ENTITIES') { inEntities = true; continue; }
+    if (pair.code === 0 && pair.value === 'ENDSEC' && inEntities) {
       if (current) entities.push(current);
       break;
     }
     if (!inEntities) continue;
-    if (p.code === 0) {
+    if (pair.code === 0) {
       if (current) entities.push(current);
-      current = {
-        type: p.value,
-        props: {}
-      };
-    } else if (current) {
-      const key = p.code;
-      if (current.props[key] === undefined) current.props[key] = p.value;else {
-        if (!Array.isArray(current.props[key])) current.props[key] = [current.props[key]];
-        current.props[key].push(p.value);
-      }
+      current = { type: pair.value, props: {} };
+      continue;
     }
+    if (!current) continue;
+    const previous = current.props[pair.code];
+    if (previous === undefined) current.props[pair.code] = pair.value;
+    else if (Array.isArray(previous)) previous.push(pair.value);
+    else current.props[pair.code] = [previous, pair.value];
   }
-  const f = (ent, code, def) => {
+  return entities;
+}
+/* Límites a partir de los puntos "extremos" que declara cada entidad. Usa Math.min/max
+   (no comparaciones) para que una coordenada corrupta (NaN) contamine el resultado y la
+   entidad se descarte entera, que es lo que hacía el parser original. */
+function dxfCornerBounds(corners) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of corners) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return { minX, minY, maxX, maxY };
+}
+/* Vértices de una polilínea (LWPOLYLINE/POLYLINE/SPLINE): códigos 10/20 repetidos. */
+function dxfVertices(ent) {
+  let xs = ent.props[10], ys = ent.props[20];
+  if (xs === undefined) return null;
+  if (!Array.isArray(xs)) xs = [xs];
+  if (!Array.isArray(ys)) ys = [ys];
+  return xs.map((x, i) => [parseFloat(x), parseFloat(ys[i])]);
+}
+function dxfVerticesToPath(vertices, closed) {
+  let d = '';
+  for (let i = 0; i < vertices.length; i++) d += (i === 0 ? 'M ' : 'L ') + vertices[i][0] + ' ' + vertices[i][1] + ' ';
+  if (closed) d += 'Z';
+  return '<path d="' + d.trim() + '"/>';
+}
+/* Un constructor por tipo de entidad: devuelve el SVG y los puntos que definen su caja
+   (o null si la entidad no trae geometría utilizable). `num` lee un código numérico. */
+const DXF_ENTITY_BUILDERS = {
+  LINE(ent, num) {
+    const x1 = num(10), y1 = num(20), x2 = num(11), y2 = num(21);
+    return {
+      svg: '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '"/>',
+      corners: [[x1, y1], [x2, y2]]
+    };
+  },
+  CIRCLE(ent, num) {
+    const cx = num(10), cy = num(20), r = num(40);
+    return {
+      svg: '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '"/>',
+      corners: [[cx - r, cy - r], [cx + r, cy + r]]
+    };
+  },
+  ARC(ent, num) {
+    const cx = num(10), cy = num(20), r = num(40);
+    const startAngle = num(50) * Math.PI / 180, endAngle = num(51) * Math.PI / 180;
+    const x1 = cx + r * Math.cos(startAngle), y1 = cy - r * Math.sin(startAngle);
+    const x2 = cx + r * Math.cos(endAngle), y2 = cy - r * Math.sin(endAngle);
+    let sweptAngle = endAngle - startAngle;
+    if (sweptAngle < 0) sweptAngle += Math.PI * 2;
+    const largeArc = sweptAngle > Math.PI ? 1 : 0;
+    return {
+      svg: '<path d="M ' + x1 + ' ' + y1 + ' A ' + r + ' ' + r + ' 0 ' + largeArc + ' 1 ' + x2 + ' ' + y2 + '"/>',
+      corners: [[cx - r, cy - r], [cx + r, cy + r]]
+    };
+  },
+  LWPOLYLINE(ent, num) {
+    const vertices = dxfVertices(ent);
+    if (!vertices) return null;
+    return { svg: dxfVerticesToPath(vertices, num(70) & 1), corners: vertices };
+  },
+  ELLIPSE(ent, num) {
+    const cx = num(10), cy = num(20);
+    const majorX = num(11), majorY = num(21);
+    const majorRadius = Math.sqrt(majorX * majorX + majorY * majorY);
+    const minorRadius = majorRadius * num(40, 1);
+    const angleDeg = Math.atan2(majorY, majorX) * 180 / Math.PI;
+    const r = Math.max(majorRadius, minorRadius);
+    return {
+      svg: '<ellipse cx="' + cx + '" cy="' + cy + '" rx="' + majorRadius + '" ry="' + minorRadius + '" transform="rotate(' + angleDeg + ' ' + cx + ' ' + cy + ')"/>',
+      corners: [[cx - r, cy - r], [cx + r, cy + r]]
+    };
+  },
+  SPLINE(ent) {
+    const vertices = dxfVertices(ent); // aproximada por sus puntos de control
+    if (!vertices) return null;
+    return { svg: dxfVerticesToPath(vertices, false), corners: vertices };
+  },
+  POINT(ent, num) {
+    const x = num(10), y = num(20);
+    return {
+      svg: '<circle cx="' + x + '" cy="' + y + '" r="0.5"/>',
+      corners: [[x - 0.5, y - 0.5], [x + 0.5, y + 0.5]]
+    };
+  }
+};
+DXF_ENTITY_BUILDERS.POLYLINE = DXF_ENTITY_BUILDERS.LWPOLYLINE;
+function dxfEntityToPart(ent) {
+  const build = DXF_ENTITY_BUILDERS[ent.type];
+  if (!build) return null;
+  const num = (code, def) => {
     const v = ent.props[code];
     return v !== undefined ? parseFloat(Array.isArray(v) ? v[0] : v) : def || 0;
   };
-  const svgParts = [];
-  for (const ent of entities) {
-    let svg = '',
-      minX = Infinity,
-      minY = Infinity,
-      maxX = -Infinity,
-      maxY = -Infinity;
-    const expand = (x, y) => {
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
-    };
-    switch (ent.type) {
-      case 'LINE':
-        {
-          const x1 = f(ent, 10),
-            y1 = f(ent, 20),
-            x2 = f(ent, 11),
-            y2 = f(ent, 21);
-          svg = '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '"/>';
-          expand(x1, y1);
-          expand(x2, y2);
-          break;
-        }
-      case 'CIRCLE':
-        {
-          const cx = f(ent, 10),
-            cy = f(ent, 20),
-            r = f(ent, 40);
-          svg = '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '"/>';
-          expand(cx - r, cy - r);
-          expand(cx + r, cy + r);
-          break;
-        }
-      case 'ARC':
-        {
-          const cx = f(ent, 10),
-            cy = f(ent, 20),
-            r = f(ent, 40);
-          const sa = f(ent, 50) * Math.PI / 180,
-            ea = f(ent, 51) * Math.PI / 180;
-          const x1 = cx + r * Math.cos(sa),
-            y1 = cy - r * Math.sin(sa);
-          const x2 = cx + r * Math.cos(ea),
-            y2 = cy - r * Math.sin(ea);
-          let da = ea - sa;
-          if (da < 0) da += Math.PI * 2;
-          const large = da > Math.PI ? 1 : 0;
-          const sweep = 1;
-          svg = '<path d="M ' + x1 + ' ' + y1 + ' A ' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' ' + x2 + ' ' + y2 + '"/>';
-          expand(cx - r, cy - r);
-          expand(cx + r, cy + r);
-          break;
-        }
-      case 'LWPOLYLINE':
-      case 'POLYLINE':
-        {
-          let xs = ent.props[10],
-            ys = ent.props[20];
-          if (xs === undefined) break;
-          if (!Array.isArray(xs)) xs = [xs];
-          if (!Array.isArray(ys)) ys = [ys];
-          const closed = f(ent, 70) & 1;
-          let d = '';
-          for (let i = 0; i < xs.length; i++) {
-            const x = parseFloat(xs[i]),
-              y = parseFloat(ys[i]);
-            d += (i === 0 ? 'M ' : 'L ') + x + ' ' + y + ' ';
-            expand(x, y);
-          }
-          if (closed) d += 'Z';
-          svg = '<path d="' + d.trim() + '"/>';
-          break;
-        }
-      case 'ELLIPSE':
-        {
-          const cx = f(ent, 10),
-            cy = f(ent, 20);
-          const ex = f(ent, 11),
-            ey = f(ent, 21);
-          const ratio = f(ent, 40, 1);
-          const rmaj = Math.sqrt(ex * ex + ey * ey);
-          const rmin = rmaj * ratio;
-          const angle = Math.atan2(ey, ex) * 180 / Math.PI;
-          svg = '<ellipse cx="' + cx + '" cy="' + cy + '" rx="' + rmaj + '" ry="' + rmin + '" transform="rotate(' + angle + ' ' + cx + ' ' + cy + ')"/>';
-          const r = Math.max(rmaj, rmin);
-          expand(cx - r, cy - r);
-          expand(cx + r, cy + r);
-          break;
-        }
-      case 'SPLINE':
-        {
-          let xs = ent.props[10],
-            ys = ent.props[20];
-          if (xs === undefined) break;
-          if (!Array.isArray(xs)) xs = [xs];
-          if (!Array.isArray(ys)) ys = [ys];
-          let d = '';
-          for (let i = 0; i < xs.length; i++) {
-            const x = parseFloat(xs[i]),
-              y = parseFloat(ys[i]);
-            d += (i === 0 ? 'M ' : 'L ') + x + ' ' + y + ' ';
-            expand(x, y);
-          }
-          svg = '<path d="' + d.trim() + '"/>';
-          break;
-        }
-      case 'POINT':
-        {
-          const x = f(ent, 10),
-            y = f(ent, 20);
-          svg = '<circle cx="' + x + '" cy="' + y + '" r="0.5"/>';
-          expand(x - 0.5, y - 0.5);
-          expand(x + 0.5, y + 0.5);
-          break;
-        }
+  const built = build(ent, num);
+  if (!built) return null;
+  const b = dxfCornerBounds(built.corners);
+  if (!(b.minX < Infinity)) return null; // sin geometría válida (vacía o con NaN)
+  const layer = ent.props[8] || '0';
+  const aci = Array.isArray(ent.props[62]) ? ent.props[62][0] : ent.props[62];
+  const capa = capaFromDXF(layer, aci);
+  return {
+    svg: built.svg.replace(/^<(\w+)/, '<$1 data-capa="' + capa + '"'),
+    bbox: { x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY },
+    layer,
+    capa
+  };
+}
+/* Unidad de dibujo declarada en la cabecera ($INSUNITS); mm si no la declara. */
+function readDxfUnit(lines) {
+  for (let i = 0; i < lines.length - 2; i++) {
+    if (lines[i].trim() !== '$INSUNITS') continue;
+    for (let j = i + 1; j < Math.min(i + 20, lines.length - 1); j += 2) {
+      if (lines[j].trim() === '70') return DXF_UNIT_BY_INSUNITS[parseInt(lines[j + 1])] || 'mm';
     }
-    if (svg && minX < Infinity) {
-      const aci62 = Array.isArray(ent.props[62]) ? ent.props[62][0] : ent.props[62];
-      const capa = capaFromDXF(ent.props[8] || '0', aci62);
-      svg = svg.replace(/^<(\w+)/, '<$1 data-capa="' + capa + '"');
-      svgParts.push({
-        svg,
-        bbox: {
-          x: minX,
-          y: minY,
-          w: maxX - minX,
-          h: maxY - minY
-        },
-        layer: ent.props[8] || '0',
-        capa
-      });
+    break;
+  }
+  return 'mm';
+}
+/* Partes que se tocan (o casi: 2% del tamaño) = misma pieza. Así el contorno y sus
+   hendidos/taladros viajan juntos. Union-find sobre las cajas envolventes. */
+function groupTouchingParts(parts) {
+  const parentOf = parts.map((_, i) => i);
+  const find = i => parentOf[i] === i ? i : parentOf[i] = find(parentOf[i]);
+  for (let i = 0; i < parts.length; i++) {
+    const a = parts[i].bbox;
+    for (let j = i + 1; j < parts.length; j++) {
+      const b = parts[j].bbox;
+      const margin = Math.max(a.w, a.h, b.w, b.h) * 0.02;
+      if (bboxesOverlap(a, b, margin)) parentOf[find(i)] = find(j);
     }
   }
+  const byRoot = new Map();
+  for (let i = 0; i < parts.length; i++) {
+    const root = find(i);
+    if (!byRoot.has(root)) byRoot.set(root, []);
+    byRoot.get(root).push(i);
+  }
+  const groups = [...byRoot.values()].map(indices => {
+    indices.sort((a, b) => a - b);
+    return { indices, bbox: unionBBoxes(indices.map(i => parts[i].bbox)) };
+  });
+  groups.sort((g1, g2) => g1.indices[0] - g2.indices[0]); // orden estable de aparición
+  return groups;
+}
+/* Capa del programa que representa a la pieza: si alguna parte es de corte manda "corte"
+   (es lo que define la silueta); si no, la de la primera parte. */
+function capaOfParts(capaList) {
+  if (capaList.includes('corte')) return 'corte';
+  return capaList[0] || 'corte';
+}
+/* Campos comunes de cualquier pieza importada (DXF o SVG): medida en mm, viewBox con
+   1 mm de margen y tamaño original del dibujo. Cada parser añade su propia geometría. */
+function importedPieceBase(idPrefix, index, bbox, scale) {
+  return {
+    id: idPrefix + '-' + Date.now() + '-' + index,
+    w: Math.round(bbox.w * scale * 10) / 10,
+    h: Math.round(bbox.h * scale * 10) / 10,
+    viewBox: bbox.x - 1 + ' ' + (bbox.y - 1) + ' ' + (bbox.w + 2) + ' ' + (bbox.h + 2),
+    quantity: 1,
+    _svgW: bbox.w,
+    _svgH: bbox.h
+  };
+}
+function parseDXF(dxfText, userScale) {
+  const { lines, pairs } = readDxfGroupPairs(dxfText);
+  const svgParts = readDxfEntities(pairs).map(dxfEntityToPart).filter(Boolean);
   if (!svgParts.length) return {
     pieces: [],
     scale: 1,
@@ -10440,119 +10548,177 @@ function parseDXF(dxfText, userScale) {
     docW: 0,
     docH: 0
   };
-  const groups = [];
-  function bboxOverlap(a, b, margin) {
-    return !(a.x + a.w + margin < b.x || b.x + b.w + margin < a.x || a.y + a.h + margin < b.y || b.y + b.h + margin < a.y);
-  }
-  const parent = Array.from({
-    length: svgParts.length
-  }, (_, i) => i);
-  const find = i => parent[i] === i ? i : parent[i] = find(parent[i]);
-  const union = (a, b) => {
-    parent[find(a)] = find(b);
-  };
-  for (let i = 0; i < svgParts.length; i++) {
-    const a = svgParts[i].bbox;
-    for (let j = i + 1; j < svgParts.length; j++) {
-      const b = svgParts[j].bbox;
-      const margin = Math.max(a.w, a.h, b.w, b.h) * 0.02;
-      if (bboxOverlap(a, b, margin)) union(i, j);
-    }
-  }
-  const byRoot = new Map();
-  for (let i = 0; i < svgParts.length; i++) {
-    const r = find(i);
-    if (!byRoot.has(r)) byRoot.set(r, []);
-    byRoot.get(r).push(i);
-  }
-  for (const indices of byRoot.values()) {
-    indices.sort((p, q) => p - q);
-    let gBox = {
-      ...svgParts[indices[0]].bbox
-    };
-    for (let k = 1; k < indices.length; k++) {
-      const nb = svgParts[indices[k]].bbox;
-      const nx = Math.min(gBox.x, nb.x),
-        ny = Math.min(gBox.y, nb.y);
-      gBox = {
-        x: nx,
-        y: ny,
-        w: Math.max(gBox.x + gBox.w, nb.x + nb.w) - nx,
-        h: Math.max(gBox.y + gBox.h, nb.y + nb.h) - ny
-      };
-    }
-    groups.push({
-      indices,
-      bbox: gBox
-    });
-  }
-  groups.sort((g1, g2) => g1.indices[0] - g2.indices[0]);
-  let dxfUnit = 'mm';
-  for (let i = 0; i < lines.length - 2; i++) {
-    if (lines[i].trim() === '$INSUNITS') {
-      for (let j = i + 1; j < Math.min(i + 20, lines.length - 1); j += 2) {
-        if (lines[j].trim() === '70') {
-          const u = parseInt(lines[j + 1]);
-          if (u === 1) dxfUnit = 'in';else if (u === 2) dxfUnit = 'ft';else if (u === 4) dxfUnit = 'mm';else if (u === 5) dxfUnit = 'cm';else if (u === 6) dxfUnit = 'm';
-          break;
-        }
-      }
-      break;
-    }
-  }
-  const toMM = v => {
-    if (dxfUnit === 'mm') return v;
-    if (dxfUnit === 'cm') return v * 10;
-    if (dxfUnit === 'm') return v * 1000;
-    if (dxfUnit === 'in') return v * 25.4;
-    if (dxfUnit === 'ft') return v * 304.8;
-    return v;
-  };
-  let scale = 1;
-  if (dxfUnit === 'mm') scale = 1;else if (dxfUnit === 'cm') scale = 10;else if (dxfUnit === 'm') scale = 1000;else if (dxfUnit === 'in') scale = 25.4;else if (dxfUnit === 'ft') scale = 304.8;
-  if (userScale > 0) scale = userScale;
-  let docMinX = Infinity,
-    docMinY = Infinity,
-    docMaxX = -Infinity,
-    docMaxY = -Infinity;
-  svgParts.forEach(p => {
-    docMinX = Math.min(docMinX, p.bbox.x);
-    docMinY = Math.min(docMinY, p.bbox.y);
-    docMaxX = Math.max(docMaxX, p.bbox.x + p.bbox.w);
-    docMaxY = Math.max(docMaxY, p.bbox.y + p.bbox.h);
-  });
+  const groups = groupTouchingParts(svgParts);
+  const dxfUnit = readDxfUnit(lines);
+  const scale = userScale > 0 ? userScale : DXF_MM_PER_UNIT[dxfUnit];
+  const docBox = unionBBoxes(svgParts.map(p => p.bbox));
   const pieces = groups.map((g, i) => {
     const b = g.bbox;
-    let inner = '';
-    g.indices.forEach(idx => {
-      inner += svgParts[idx].svg;
-    });
-    const svgContent = inner;
-    const rawContent = inner;
-    const flippedVB = b.x - 1 + ' ' + (-b.y - b.h - 1) + ' ' + (b.w + 2) + ' ' + (b.h + 2);
+    const inner = g.indices.map(idx => svgParts[idx].svg).join('');
+    // El eje Y del DXF crece hacia arriba y el del SVG hacia abajo: se voltea el grupo
+    // sobre su propia caja para que el dibujo entre derecho.
     const flipTransform = 'translate(0,' + (b.y + (-b.y - b.h)) + ') scale(1,-1)';
+    const flipped = '<g transform="' + flipTransform + '">' + inner + '</g>';
     return {
-      id: 'dxf-' + Date.now() + '-' + i,
+      ...importedPieceBase('dxf', i, b, scale),
       label: 'Pieza DXF ' + (i + 1),
-      w: Math.round(b.w * scale * 10) / 10,
-      h: Math.round(b.h * scale * 10) / 10,
-      svgContent: '<g transform="' + flipTransform + '">' + svgContent + '</g>',
-      svgRaw: '<g transform="' + flipTransform + '">' + rawContent + '</g>',
-      capa: g.indices.map(idx => svgParts[idx].capa || "corte").includes("corte") ? "corte" : svgParts[g.indices[0]].capa || "corte",
-      viewBox: b.x - 1 + ' ' + (b.y - 1) + ' ' + (b.w + 2) + ' ' + (b.h + 2),
-      quantity: 1,
-      _svgW: b.w,
-      _svgH: b.h
+      svgContent: flipped,
+      svgRaw: flipped,
+      capa: capaOfParts(g.indices.map(idx => svgParts[idx].capa || "corte"))
     };
   });
-  const docW = Math.round((docMaxX - docMinX) * scale * 10) / 10;
-  const docH = Math.round((docMaxY - docMinY) * scale * 10) / 10;
   return {
     pieces,
     scale: Math.round(scale * 10000) / 10000,
     unit: dxfUnit,
-    docW,
-    docH
+    docW: Math.round(docBox.w * scale * 10) / 10,
+    docH: Math.round(docBox.h * scale * 10) / 10
+  };
+}
+/* ── Importación SVG ──────────────────────────────────────────────────────────
+   Cuatro pasos: recoger las formas que son corte, medirlas, agruparlas por
+   contención (contorno + sus detalles = una pieza) y serializarlas. */
+// Grupos de anotación / cajetín / acotación: NO son geometría de corte y no deben nestearse.
+// Se ignora el subárbol completo si el id/nombre del <g> coincide. OJO: "Cajeado" (mecanizado real)
+// NO debe coincidir — por eso el patrón usa "cajetin", no "caje".
+const SVG_ANNOTATION_RE = /^(espec|acotac|acot|cota|dim|dimension|texto|text|info|titulo|t[ií]tulo|cajet[ií]n|cartel[ae]|leyenda|notas?|annotation)\b|^(espec|acot|cota|dim|texto|info|titulo|cajetin|leyenda|nota)/i;
+/* demo-11: capas de IMPRESIÓN (bleed/margen del impreso) y MARCAS de registro (X_Mark)
+   NO son corte CNC — se colaban como piezas y solapaban el corte real. "CORTE IMPRESIÓN"
+   contiene "CORTE" pero es el contorno del impreso. Se descartan como el cajetín. */
+const SVG_PRINT_MARK_RE = /impres|x[_ -]?mark|^marcas?$|^margen\b/i;
+const SVG_SHAPE_TAGS = ["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"];
+const SVG_CONTAINER_TAGS = ["g", "svg", "symbol", "a"];
+const SVG_IGNORED_TAGS = ["defs", "clippath", "mask", "metadata", "title", "desc"];
+const SVG_MIN_SHAPE_MM = 0.5; // por debajo de esto no es una pieza, es ruido del archivo
+function collectCuttableElements(root) {
+  const elements = [];
+  let ignoredAnnotations = 0;
+  const walk = (node, parentTransform, layer) => {
+    const own = node.getAttribute && node.getAttribute("transform") || "";
+    const transform = parentTransform + (own ? " " + own : "");
+    for (const child of node.children || []) {
+      const tag = child.tagName && child.tagName.toLowerCase();
+      if (!tag || SVG_IGNORED_TAGS.includes(tag)) continue;
+      if (SVG_CONTAINER_TAGS.includes(tag)) {
+        const groupName = ((child.getAttribute && (child.getAttribute("id") || child.getAttribute("inkscape:label") || child.getAttribute("data-name"))) || "").trim();
+        if (groupName && (SVG_ANNOTATION_RE.test(groupName) || SVG_PRINT_MARK_RE.test(groupName))) {
+          ignoredAnnotations++; // cajetín/anotación/impresión/marca → no es geometría de corte
+          continue;
+        }
+        walk(child, transform, groupName || layer); // demo-11: propaga el nombre de capa REAL
+        continue;
+      }
+      // demo-11: `layer` = capa real del elemento (nombre literal del archivo)
+      if (SVG_SHAPE_TAGS.includes(tag)) elements.push({ el: child, tag, transform, layer });
+    }
+  };
+  walk(root, "", null);
+  return { elements, ignoredAnnotations };
+}
+/* Caja calculada a mano cuando getBBox() no da medida (navegador sin layout del nodo).
+   Devuelve null si con los atributos tampoco se puede deducir. */
+function bboxFromAttributes(el, tag) {
+  const n = k => parseFloat(el.getAttribute(k)) || 0;
+  if (tag === 'rect') return { x: n('x'), y: n('y'), w: n('width'), h: n('height') };
+  if (tag === 'circle') {
+    const r = n('r');
+    return r > 0 ? { x: n('cx') - r, y: n('cy') - r, w: r * 2, h: r * 2 } : null;
+  }
+  if (tag === 'ellipse') {
+    const rx = n('rx'), ry = n('ry');
+    return rx > 0 && ry > 0 ? { x: n('cx') - rx, y: n('cy') - ry, w: rx * 2, h: ry * 2 } : null;
+  }
+  if (tag === 'line') {
+    const x1 = n('x1'), y1 = n('y1'), x2 = n('x2'), y2 = n('y2');
+    return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1) || 0.1, h: Math.abs(y2 - y1) || 0.1 };
+  }
+  if (tag === 'polygon' || tag === 'polyline') {
+    const nums = (el.getAttribute('points') || '').trim().split(/[\s,]+/).map(parseFloat).filter(v => !isNaN(v));
+    if (nums.length < 4) return null;
+    const pts = [];
+    for (let i = 0; i < nums.length - 1; i += 2) pts.push({ x: nums[i], y: nums[i + 1] });
+    const box = bboxOfPoints(pts);
+    return box && box.w > 0 && box.h > 0 ? box : null;
+  }
+  return null;
+}
+/* Mide cada forma con getBBox() dentro de un <svg> oculto (así respeta transforms y
+   curvas). Se insertan TODAS antes de leer ninguna: una sola pasada de layout en vez
+   de una por elemento. Escribe `bbox` en cada entrada. */
+function measureElementBBoxes(elements, viewBox, width, height) {
+  const NS = "http://www.w3.org/2000/svg";
+  const stage = document.createElementNS(NS, "svg");
+  if (viewBox) stage.setAttribute("viewBox", viewBox);
+  stage.setAttribute("width", width);
+  stage.setAttribute("height", height);
+  stage.style.cssText = "position:absolute;visibility:hidden;width:0;height:0;overflow:hidden";
+  document.body.appendChild(stage);
+  const targets = elements.map(item => {
+    const clone = item.el.cloneNode(true);
+    if (!(item.transform && item.transform.trim())) {
+      stage.appendChild(clone);
+      return clone;
+    }
+    const wrapper = document.createElementNS(NS, "g");
+    wrapper.setAttribute("transform", item.transform);
+    wrapper.appendChild(clone);
+    stage.appendChild(wrapper);
+    return wrapper;
+  });
+  elements.forEach((item, i) => {
+    let measured = null;
+    try {
+      const b = targets[i].getBBox();
+      if (b.width > 0 && b.height > 0) measured = { x: b.x, y: b.y, w: b.width, h: b.height };
+    } catch (e) {}
+    item.bbox = measured || bboxFromAttributes(item.el, item.tag);
+  });
+  document.body.removeChild(stage);
+}
+/* Agrupación por contención jerárquica: cada pieza = el contorno raíz + TODAS las capas
+   de detalle (hendido, cajeado, taladros, grabado…) que quedan dentro de él. Los trazados
+   compuestos (texto vectorizado, contornos con agujeros…) también participan como
+   contenedores/contenidos, de modo que una pieza con muchas capas NO se separa en varias
+   piezas y conserva todas sus capas. */
+function groupElementsByContainment(elements) {
+  const valid = [];
+  elements.forEach((item, idx) => {
+    if (item.bbox && item.bbox.w >= SVG_MIN_SHAPE_MM && item.bbox.h >= SVG_MIN_SHAPE_MM) valid.push(idx);
+  });
+  const areaOf = idx => elements[idx].bbox.w * elements[idx].bbox.h;
+  // "a" envuelve a "b" si su área es mayor (o igual con índice menor, para desempatar
+  // contornos idénticos superpuestos sin crear ciclos).
+  const wraps = (a, b) => {
+    const areaA = areaOf(a), areaB = areaOf(b);
+    return areaA > areaB || areaA === areaB && a < b;
+  };
+  // padre de cada elemento = el elemento más ajustado (menor área) que lo contiene
+  const parentOf = {};
+  valid.forEach(i => {
+    let best = -1;
+    valid.forEach(j => {
+      if (j === i || !wraps(j, i) || !bboxContains(elements[j].bbox, elements[i].bbox, 1)) return;
+      if (best === -1 || wraps(best, j)) best = j;
+    });
+    parentOf[i] = best;
+  });
+  return [...groupIndicesByRoot(valid, parentOf, valid.length).values()].map(indices => ({
+    indices,
+    bbox: unionBBoxes(indices.map(i => elements[i].bbox))
+  }));
+}
+/* Marca el elemento con su capa detectada y devuelve su marcado en dos versiones:
+   `raw` conserva los colores (vista previa) y `clean` va sin estilos (geometría de corte). */
+function serializeCuttableElement(item) {
+  const capa = capaFromColor(colorOfSvgEl(item.el)) || "corte";
+  item.el.setAttribute("data-capa", capa);
+  if (item.layer) item.el.setAttribute("data-layer", item.layer); // demo-11: capa real → subMeta.layer + DXF verbatim
+  const markup = new XMLSerializer().serializeToString(item.el);
+  const wrap = m => item.transform && item.transform.trim() ? '<g transform="' + item.transform + '">' + m + '</g>' : m;
+  return {
+    capa,
+    raw: wrap(markup),
+    clean: wrap(markup.replace(/\s*fill="[^"]*"/g, '').replace(/\s*stroke="[^"]*"/g, '').replace(/\s*stroke-width="[^"]*"/g, '').replace(/\s*style="[^"]*"/g, ''))
   };
 }
 function parseSVG(svgText, userScale) {
@@ -10589,251 +10755,29 @@ function parseSVG(svgText, userScale) {
   const intH = vbH || rH.v || 500;
   let scale = docWmm / intW;
   if (userScale > 0) scale = userScale;
-  const allEls = [];
-  // Grupos de anotación / cajetín / acotación: NO son geometría de corte y no deben nestearse.
-  // Se ignora el subárbol completo si el id/nombre del <g> coincide. OJO: "Cajeado" (mecanizado real)
-  // NO debe coincidir — por eso el patrón usa "cajetin", no "caje".
-  const _ANNOT_RE = /^(espec|acotac|acot|cota|dim|dimension|texto|text|info|titulo|t[ií]tulo|cajet[ií]n|cartel[ae]|leyenda|notas?|annotation)\b|^(espec|acot|cota|dim|texto|info|titulo|cajetin|leyenda|nota)/i;
-  /* demo-11: capas de IMPRESIÓN (bleed/margen del impreso) y MARCAS de registro (X_Mark)
-     NO son corte CNC — se colaban como piezas y solapaban el corte real. "CORTE IMPRESIÓN"
-     contiene "CORTE" pero es el contorno del impreso. Se descartan como el cajetín. */
-  const _PRINT_MARK_RE = /impres|x[_ -]?mark|^marcas?$|^margen\b/i;
-  let _ignoredAnnot = 0;
-  const collect = (node, pt = "", layer = null) => {
-    const t = node.getAttribute && node.getAttribute("transform") || "";
-    const ct = pt + (t ? " " + t : "");
-    for (const ch of node.children || []) {
-      const tag = ch.tagName && ch.tagName.toLowerCase();
-      if (!tag) continue;
-      if (["defs", "clippath", "mask", "metadata", "title", "desc"].includes(tag)) continue;
-      if (["g", "svg", "symbol", "a"].includes(tag)) {
-        const gid = ((ch.getAttribute && (ch.getAttribute("id") || ch.getAttribute("inkscape:label") || ch.getAttribute("data-name"))) || "").trim();
-        if (gid && (_ANNOT_RE.test(gid) || _PRINT_MARK_RE.test(gid))) {
-          _ignoredAnnot++;
-          continue; // cajetín/anotación/impresión/marca → no es geometría de corte
-        }
-        collect(ch, ct, gid || layer); // demo-11: propaga el nombre de capa REAL (g con id/data-name)
-        continue;
-      }
-      if (["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"].includes(tag)) allEls.push({
-        el: ch,
-        tag,
-        transform: ct,
-        layer: layer // demo-11: capa real del elemento (nombre literal del archivo)
-      });
-    }
-  };
-  collect(svg);
-  const tmp = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  if (vb) tmp.setAttribute("viewBox", vb);
-  tmp.setAttribute("width", intW);
-  tmp.setAttribute("height", intH);
-  tmp.style.cssText = "position:absolute;visibility:hidden;width:0;height:0;overflow:hidden";
-  document.body.appendChild(tmp);
-  const measure = allEls.map(item => {
-    const cl = item.el.cloneNode(true);
-    let target;
-    if (item.transform && item.transform.trim()) {
-      const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      g.setAttribute("transform", item.transform);
-      g.appendChild(cl);
-      tmp.appendChild(g);
-      target = g;
-    } else {
-      tmp.appendChild(cl);
-      target = cl;
-    }
-    return {
-      item,
-      target
-    };
-  });
-  measure.forEach(({
-    item,
-    target
-  }) => {
-    try {
-      const b = target.getBBox();
-      if (b.width > 0 && b.height > 0) {
-        item.bbox = {
-          x: b.x,
-          y: b.y,
-          w: b.width,
-          h: b.height
-        };
-      } else {
-        item.bbox = null;
-      }
-    } catch (e) {
-      item.bbox = null;
-    }
-    if (!item.bbox) {
-      const el = item.el;
-      const getN = k => parseFloat(el.getAttribute(k)) || 0;
-      if (item.tag === 'rect') {
-        item.bbox = {
-          x: getN('x'),
-          y: getN('y'),
-          w: getN('width'),
-          h: getN('height')
-        };
-      } else if (item.tag === 'circle') {
-        const cx = getN('cx'),
-          cy = getN('cy'),
-          r = getN('r');
-        if (r > 0) item.bbox = {
-          x: cx - r,
-          y: cy - r,
-          w: r * 2,
-          h: r * 2
-        };
-      } else if (item.tag === 'ellipse') {
-        const cx = getN('cx'),
-          cy = getN('cy'),
-          rx = getN('rx'),
-          ry = getN('ry');
-        if (rx > 0 && ry > 0) item.bbox = {
-          x: cx - rx,
-          y: cy - ry,
-          w: rx * 2,
-          h: ry * 2
-        };
-      } else if (item.tag === 'line') {
-        const x1 = getN('x1'),
-          y1 = getN('y1'),
-          x2 = getN('x2'),
-          y2 = getN('y2');
-        item.bbox = {
-          x: Math.min(x1, x2),
-          y: Math.min(y1, y2),
-          w: Math.abs(x2 - x1) || 0.1,
-          h: Math.abs(y2 - y1) || 0.1
-        };
-      } else if (item.tag === 'polygon' || item.tag === 'polyline') {
-        const pts = (el.getAttribute('points') || '').trim().split(/[\s,]+/).map(parseFloat).filter(n => !isNaN(n));
-        if (pts.length >= 4) {
-          let mx = Infinity,
-            my = Infinity,
-            Mx = -Infinity,
-            My = -Infinity;
-          for (let i = 0; i < pts.length - 1; i += 2) {
-            mx = Math.min(mx, pts[i]);
-            my = Math.min(my, pts[i + 1]);
-            Mx = Math.max(Mx, pts[i]);
-            My = Math.max(My, pts[i + 1]);
-          }
-          if (Mx > mx && My > my) item.bbox = {
-            x: mx,
-            y: my,
-            w: Mx - mx,
-            h: My - my
-          };
-        }
-      }
-    }
-  });
-  // Agrupacion por contencion jerarquica: cada pieza = el contorno raiz + TODAS
-  // las capas de detalle (hendido, cajeado, taladros, grabado...) que quedan
-  // dentro de el. A diferencia del metodo anterior, los trazados compuestos
-  // (paths con varias subformas: texto vectorizado, contornos con agujeros...)
-  // tambien participan como contenedores/contenidos, de modo que una pieza con
-  // muchas capas NO se separa en varias piezas y conserva todas sus capas.
-  const boxes = [];
-  const inside = (o, i) => o && i && i.x >= o.x - 1 && i.y >= o.y - 1 && i.x + i.w <= o.x + o.w + 1 && i.y + i.h <= o.y + o.h + 1;
-  const valid = [];
-  allEls.forEach((item, idx) => {
-    if (item.bbox && item.bbox.w >= 0.5 && item.bbox.h >= 0.5) valid.push(idx);
-  });
-  const areaOf = idx => allEls[idx].bbox.w * allEls[idx].bbox.h;
-  // "a" envuelve a "b" si su area es mayor (o igual con indice menor, para
-  // desempatar contornos identicos superpuestos sin crear ciclos).
-  const wraps = (a, b) => {
-    const aa = areaOf(a),
-      ab = areaOf(b);
-    return aa > ab || aa === ab && a < b;
-  };
-  // padre de cada elemento = el elemento mas ajustado (menor area) que lo contiene
-  const parentOf = {};
-  valid.forEach(i => {
-    let best = -1;
-    valid.forEach(j => {
-      if (j === i || !wraps(j, i) || !inside(allEls[j].bbox, allEls[i].bbox)) return;
-      if (best === -1 || wraps(best, j)) best = j;
-    });
-    parentOf[i] = best;
-  });
-  const rootOf = i => {
-    let n = i,
-      guard = 0;
-    while (parentOf[n] >= 0 && guard++ < valid.length) n = parentOf[n];
-    return n;
-  };
-  const byRoot = new Map();
-  valid.forEach(i => {
-    const r = rootOf(i);
-    if (!byRoot.has(r)) byRoot.set(r, []);
-    byRoot.get(r).push(i);
-  });
-  for (const indices of byRoot.values()) {
-    let b = {
-      ...allEls[indices[0]].bbox
-    };
-    for (let k = 1; k < indices.length; k++) {
-      const nb = allEls[indices[k]].bbox;
-      const nx = Math.min(b.x, nb.x),
-        ny = Math.min(b.y, nb.y);
-      b = {
-        x: nx,
-        y: ny,
-        w: Math.max(b.x + b.w, nb.x + nb.w) - nx,
-        h: Math.max(b.y + b.h, nb.y + nb.h) - ny
-      };
-    }
-    boxes.push({
-      indices,
-      bbox: b
-    });
-  }
-  document.body.removeChild(tmp);
-  const pieces = boxes.map((g, i) => {
+  const { elements, ignoredAnnotations } = collectCuttableElements(svg);
+  measureElementBBoxes(elements, vb, intW, intH);
+  const groups = groupElementsByContainment(elements);
+  const pieces = groups.map((g, i) => {
     const b = g.bbox;
-    let inner = "",
-      innerRaw = "";
-    g.indices.forEach(idx => {
-      const it = allEls[idx];
-      it.el.setAttribute("data-capa", capaFromColor(colorOfSvgEl(it.el)) || "corte");
-      if (it.layer) it.el.setAttribute("data-layer", it.layer); // demo-11: nombre de capa real → subMeta.layer + DXF verbatim
-      let mk = new XMLSerializer().serializeToString(it.el);
-      if (it.transform && it.transform.trim()) mk = '<g transform="' + it.transform + '">' + mk + '</g>';
-      innerRaw += mk;
-      let stripped = new XMLSerializer().serializeToString(it.el);
-      stripped = stripped.replace(/\s*fill="[^"]*"/g, '').replace(/\s*stroke="[^"]*"/g, '').replace(/\s*stroke-width="[^"]*"/g, '').replace(/\s*style="[^"]*"/g, '');
-      if (it.transform && it.transform.trim()) stripped = '<g transform="' + it.transform + '">' + stripped + '</g>';
-      inner += stripped;
-    });
+    const parts = g.indices.map(idx => serializeCuttableElement(elements[idx]));
     return {
-      id: 'svg-' + Date.now() + '-' + i,
+      ...importedPieceBase('svg', i, b, scale),
       label: 'Pieza ' + (i + 1),
-      w: Math.round(b.w * scale * 10) / 10,
-      h: Math.round(b.h * scale * 10) / 10,
-      svgContent: inner,
-      svgRaw: innerRaw,
-      capa: g.indices.map(idx => allEls[idx].el.getAttribute("data-capa") || "corte").includes("corte") ? "corte" : allEls[g.indices[0]].el.getAttribute("data-capa") || "corte",
-      viewBox: b.x - 1 + ' ' + (b.y - 1) + ' ' + (b.w + 2) + ' ' + (b.h + 2),
-      quantity: 1,
-      _svgW: b.w,
-      _svgH: b.h,
-      layers: [...new Set(g.indices.map(idx => allEls[idx].layer).filter(Boolean))] // demo-11: capas reales presentes
+      svgContent: parts.map(p => p.clean).join(''),
+      svgRaw: parts.map(p => p.raw).join(''),
+      capa: capaOfParts(parts.map(p => p.capa)),
+      layers: [...new Set(g.indices.map(idx => elements[idx].layer).filter(Boolean))] // demo-11: capas reales presentes
     };
   });
-  if (_ignoredAnnot > 0) { try { console.info('[Rotula] importación SVG: ' + _ignoredAnnot + ' grupo(s) de anotación/cajetín ignorado(s) (no se nestean)'); } catch (e) {} }
+  if (ignoredAnnotations > 0) { try { console.info('[Rotula] importación SVG: ' + ignoredAnnotations + ' grupo(s) de anotación/cajetín ignorado(s) (no se nestean)'); } catch (e) {} }
   return {
     pieces,
     scale: Math.round(scale * 10000) / 10000,
     unit,
     docW: Math.round(docWmm * 10) / 10,
     docH: Math.round(docHmm * 10) / 10,
-    ignoredAnnot: _ignoredAnnot
+    ignoredAnnot: ignoredAnnotations
   };
 }
 const GRID_CELL = 50;
@@ -10971,92 +10915,125 @@ function rot90(m) {
     origH: m.origW
   };
 }
-async function nestPieces(pieces, W, H, gap, onProgress) {
-  const gW = Math.floor(W / GRID_CELL);
-  const gH = Math.floor(H / GRID_CELL);
-  const all = [];
+/* ── Motor Grid: piezas rasterizadas a máscara sobre una rejilla de celdas ─────
+   nestPieces coordina cuatro fases (instancias → máscaras → colocación → revisión);
+   cada fase vive en su propia función para poder leerlas —y probarlas— por separado. */
+/* Una instancia por unidad pedida, de mayor a menor: las grandes primero dejan huecos
+   que las pequeñas sí pueden aprovechar (al revés no funciona). */
+function expandPiecesToInstances(pieces) {
+  const instances = [];
   pieces.forEach(p => {
-    for (let q = 0; q < p.quantity; q++) all.push({
-      ...p,
-      iid: p.id + '-q' + q
-    });
+    for (let q = 0; q < p.quantity; q++) instances.push({ ...p, iid: p.id + '-q' + q });
   });
-  all.sort((a, b) => b.w * b.h - a.w * a.h || b.h - a.h);
-  if (!all.length) return [{
-    pieces: []
-  }];
-  const mc = {};
-  const uniqTotal = new Set(all.map(p => p.id)).size;
-  let mDone = 0;
-  const uniqueP = [];
+  instances.sort((a, b) => b.w * b.h - a.w * a.h || b.h - a.h);
+  return instances;
+}
+const MASK_BATCH = 8; // piezas rasterizadas por tanda: no bloquear el hilo con lotes grandes
+/* Máscara de cada pieza distinta en sus cuatro giros (0/90/180/270). */
+async function buildRotationMasks(instances, onProgress) {
+  const masksById = {};
+  const uniquePieces = [];
   const seenIds = new Set();
-  for (const p of all) {
-    if (!seenIds.has(p.id)) {
-      seenIds.add(p.id);
-      uniqueP.push(p);
-    }
+  for (const p of instances) {
+    if (seenIds.has(p.id)) continue;
+    seenIds.add(p.id);
+    uniquePieces.push(p);
   }
-  const MASK_BATCH = 8;
-  for (let i = 0; i < uniqueP.length; i += MASK_BATCH) {
-    const batch = uniqueP.slice(i, i + MASK_BATCH);
+  let done = 0;
+  for (let i = 0; i < uniquePieces.length; i += MASK_BATCH) {
+    const batch = uniquePieces.slice(i, i + MASK_BATCH);
     const raws = await Promise.all(batch.map(p => svgToMask(p, FINE_RES)));
     batch.forEach((p, k) => {
       const raw = raws[k];
-      mc[p.id] = [raw, rot90(raw), rot90(rot90(raw)), rot90(rot90(rot90(raw)))];
-      mDone++;
-      if (onProgress) onProgress("masks", mDone, uniqTotal);
+      masksById[p.id] = [raw, rot90(raw), rot90(rot90(raw)), rot90(rot90(rot90(raw)))];
+      done++;
+      if (onProgress) onProgress("masks", done, uniquePieces.length);
     });
   }
-  function fits(sg, m, sx, sy) {
-    if (sx < 0 || sy < 0 || sx + m.w > gW || sy + m.h > gH) return false;
-    for (let y = 0; y < m.h; y++) {
-      const ro = y * m.w,
-        go = (sy + y) * gW;
-      for (let x = 0; x < m.w; x++) {
-        if (m.mask[ro + x] && sg[go + sx + x]) return false;
-      }
-    }
-    return true;
-  }
-  function stamp(sg, m, sx, sy) {
-    for (let y = 0; y < m.h; y++) {
-      const ro = y * m.w,
-        go = (sy + y) * gW;
-      for (let x = 0; x < m.w; x++) {
-        if (m.mask[ro + x]) sg[go + sx + x] = 1;
-      }
+  return masksById;
+}
+/* ¿cabe la máscara en (sx, sy) sin pisar nada de lo ya colocado? */
+function maskFitsAt(grid, gW, gH, m, sx, sy) {
+  if (sx < 0 || sy < 0 || sx + m.w > gW || sy + m.h > gH) return false;
+  for (let y = 0; y < m.h; y++) {
+    const maskRow = y * m.w, gridRow = (sy + y) * gW;
+    for (let x = 0; x < m.w; x++) {
+      if (m.mask[maskRow + x] && grid[gridRow + sx + x]) return false;
     }
   }
-  function countContacts(sg, m, sx, sy) {
-    let c = 0;
-    for (let y = 0; y < m.h; y++) {
-      for (let x = 0; x < m.w; x++) {
-        if (!m.mask[y * m.w + x]) continue;
-        const nbs = [[0, -1], [0, 1], [-1, 0], [1, 0]];
-        for (const [dx, dy] of nbs) {
-          const mx = x + dx,
-            my = y + dy;
-          if (mx >= 0 && mx < m.w && my >= 0 && my < m.h && m.mask[my * m.w + mx]) continue;
-          const gx = sx + mx,
-            gy = sy + my;
-          if (gx < 0 || gy < 0 || gx >= gW || gy >= gH) {
-            c++;
-            continue;
-          }
-          if (sg[gy * gW + gx]) c++;
+  return true;
+}
+function stampMask(grid, gW, m, sx, sy) {
+  for (let y = 0; y < m.h; y++) {
+    const maskRow = y * m.w, gridRow = (sy + y) * gW;
+    for (let x = 0; x < m.w; x++) {
+      if (m.mask[maskRow + x]) grid[gridRow + sx + x] = 1;
+    }
+  }
+}
+const MASK_NEIGHBOURS = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+/* Celdas del borde de la máscara que tocan otra pieza o el borde de la placa: cuanto
+   más contacto, más "encajada" queda la pieza y menos hueco desperdiciado deja. */
+function countMaskContacts(grid, gW, gH, m, sx, sy) {
+  let contacts = 0;
+  for (let y = 0; y < m.h; y++) {
+    for (let x = 0; x < m.w; x++) {
+      if (!m.mask[y * m.w + x]) continue;
+      for (const [dx, dy] of MASK_NEIGHBOURS) {
+        const mx = x + dx, my = y + dy;
+        if (mx >= 0 && mx < m.w && my >= 0 && my < m.h && m.mask[my * m.w + mx]) continue; // interior
+        const gx = sx + mx, gy = sy + my;
+        if (gx < 0 || gy < 0 || gx >= gW || gy >= gH) { contacts++; continue; } // borde de placa
+        if (grid[gy * gW + gx]) contacts++;
+      }
+    }
+  }
+  return contacts;
+}
+/* Fila ocupada más baja de la máscara (en celdas de rejilla): la "altura" que añade. */
+function maskBottomRow(m, sy) {
+  for (let y = m.h - 1; y >= 0; y--) {
+    for (let x = 0; x < m.w; x++) {
+      if (m.mask[y * m.w + x]) return sy + y + 1;
+    }
+  }
+  return sy;
+}
+/* Mejor hueco para una pieza: primero la placa más temprana, luego la posición que menos
+   altura añade, luego la más a la izquierda, y a igualdad la que más contacto tiene.
+   Los pesos del score codifican ese orden de prioridades. */
+function findBestPlacement(sheets, masks, firstSheet, gW, gH) {
+  let best = null;
+  for (let si = firstSheet; si < sheets.length; si++) {
+    const grid = sheets[si].grid;
+    for (let ri = 0; ri < masks.length; ri++) {
+      const m = masks[ri];
+      if (m.w > gW || m.h > gH) continue;
+      const maxX = gW - m.w, maxY = gH - m.h;
+      let firstFitY = Infinity;
+      for (let y = 0; y <= maxY; y++) {
+        if (firstFitY !== Infinity && y > firstFitY) break; // más abajo ya no mejora
+        for (let x = 0; x <= maxX; x++) {
+          if (!maskFitsAt(grid, gW, gH, m, x, y)) continue;
+          if (firstFitY === Infinity) firstFitY = y;
+          const addedHeight = maskBottomRow(m, y);
+          const contacts = countMaskContacts(grid, gW, gH, m, x, y);
+          const score = si * 1e12 + addedHeight * 1000000 + x * 100 - contacts * 10;
+          if (!best || score < best.score) best = { si, ri, x, y, m, score };
         }
       }
     }
-    return c;
   }
-  function maxOccupiedY(m, sy) {
-    for (let y = m.h - 1; y >= 0; y--) {
-      for (let x = 0; x < m.w; x++) {
-        if (m.mask[y * m.w + x]) return sy + y + 1;
-      }
-    }
-    return sy;
-  }
+  return best;
+}
+async function nestPieces(pieces, W, H, gap, onProgress) {
+  const gW = Math.floor(W / GRID_CELL);
+  const gH = Math.floor(H / GRID_CELL);
+  const all = expandPiecesToInstances(pieces);
+  if (!all.length) return [{
+    pieces: []
+  }];
+  const mc = await buildRotationMasks(all, onProgress);
   const sheets = [];
   const mkSheet = () => ({
     pieces: [],
@@ -11065,42 +11042,12 @@ async function nestPieces(pieces, W, H, gap, onProgress) {
   sheets.push(mkSheet());
   for (let pi = 0; pi < all.length; pi++) {
     if (onProgress) onProgress("place", pi + 1, all.length);
-    if (pi % 5 === 4) await new Promise(r => setTimeout(r, 0));
+    if (pi % 5 === 4) await new Promise(r => setTimeout(r, 0)); // deja respirar a la UI
     const p = all[pi];
     const masks = mc[p.id];
-    let best = null;
     const minSi = Number.isInteger(p.forceSheet) && p.forceSheet >= 0 ? p.forceSheet : 0;
     while (sheets.length <= minSi) sheets.push(mkSheet());
-    for (let si = minSi; si < sheets.length; si++) {
-      const sg = sheets[si].grid;
-      for (let ri = 0; ri < masks.length; ri++) {
-        const m = masks[ri];
-        if (m.w > gW || m.h > gH) continue;
-        const maxX = gW - m.w,
-          maxY = gH - m.h;
-        let bestYHere = Infinity;
-        for (let y = 0; y <= maxY; y++) {
-          if (bestYHere !== Infinity && y > bestYHere) break;
-          for (let x = 0; x <= maxX; x++) {
-            if (!fits(sg, m, x, y)) continue;
-            if (bestYHere === Infinity) bestYHere = y;
-            const myTop = maxOccupiedY(m, y);
-            const contacts = countContacts(sg, m, x, y);
-            const score = si * 1e12 + myTop * 1000000 + x * 100 - contacts * 10;
-            if (!best || score < best.score) {
-              best = {
-                si,
-                ri,
-                x,
-                y,
-                m,
-                score
-              };
-            }
-          }
-        }
-      }
-    }
+    let best = findBestPlacement(sheets, masks, minSi, gW, gH);
     if (!best) {
       let m = null,
         ri = 0;
@@ -11129,7 +11076,7 @@ async function nestPieces(pieces, W, H, gap, onProgress) {
     }
     const clampedX = Math.max(0, Math.min(best.x, gW - best.m.w));
     const clampedY = Math.max(0, Math.min(best.y, gH - best.m.h));
-    stamp(sheets[best.si].grid, best.m, clampedX, clampedY);
+    stampMask(sheets[best.si].grid, gW, best.m, clampedX, clampedY);
     sheets[best.si].pieces.push({
       ...p,
       x: clampedX * GRID_CELL,
@@ -11150,8 +11097,18 @@ async function nestPieces(pieces, W, H, gap, onProgress) {
       __cy: clampedY
     });
   }
-  const realW = gW * GRID_CELL,
-    realH = gH * GRID_CELL;
+  const errors = auditPlacedSheets(sheets, gW, gH);
+  if (errors.length) {
+    console.error('NESTING ERRORS:', errors);
+    sheets._errors = errors;
+  }
+  return sheets;
+}
+/* Revisión final (red de seguridad): ninguna pieza puede salirse de la placa ni pisar a
+   otra. Se comprueba contra la MÁSCARA real, no contra la caja envolvente, así que detecta
+   solapes que el bbox no vería. De paso limpia los campos de trabajo (__mask, __mw…). */
+function auditPlacedSheets(sheets, gW, gH) {
+  const realW = gW * GRID_CELL, realH = gH * GRID_CELL;
   const errors = [];
   sheets.forEach((sh, si) => {
     sh.pieces.forEach(p => {
@@ -11159,36 +11116,30 @@ async function nestPieces(pieces, W, H, gap, onProgress) {
         errors.push(`Placa ${si + 1} pieza ${p.label}: overflow (${p.x},${p.y})+(${p.placedW},${p.placedH}) > (${realW},${realH})`);
       }
     });
-    const vg = new Uint8Array(gW * gH);
-    const owner = new Int32Array(gW * gH);
-    for (let i = 0; i < gW * gH; i++) owner[i] = -1;
+    const occupied = new Uint8Array(gW * gH);
+    const ownerOf = new Int32Array(gW * gH).fill(-1);
     const reported = new Set();
-    for (let i = 0; i < sh.pieces.length; i++) {
-      const p = sh.pieces[i];
+    sh.pieces.forEach((p, i) => {
       const m = p.__mask;
-      if (!m) continue;
-      const mw = p.__mw,
-        mh = p.__mh,
-        cx = p.__cx,
-        cy = p.__cy;
+      if (!m) return;
+      const mw = p.__mw, mh = p.__mh, cx = p.__cx, cy = p.__cy;
       for (let y = 0; y < mh; y++) {
         for (let x = 0; x < mw; x++) {
           if (!m[y * mw + x]) continue;
-          const gi = (cy + y) * gW + (cx + x);
-          if (vg[gi]) {
-            const otherIdx = owner[gi];
-            const key = Math.min(i, otherIdx) + '-' + Math.max(i, otherIdx);
-            if (!reported.has(key)) {
-              reported.add(key);
-              errors.push(`Placa ${si + 1}: ${sh.pieces[otherIdx].label} y ${p.label} colisionan (máscara real)`);
-            }
-          } else {
-            vg[gi] = 1;
-            owner[gi] = i;
+          const cell = (cy + y) * gW + (cx + x);
+          if (!occupied[cell]) {
+            occupied[cell] = 1;
+            ownerOf[cell] = i;
+            continue;
           }
+          const otherIdx = ownerOf[cell];
+          const key = Math.min(i, otherIdx) + '-' + Math.max(i, otherIdx);
+          if (reported.has(key)) continue;
+          reported.add(key);
+          errors.push(`Placa ${si + 1}: ${sh.pieces[otherIdx].label} y ${p.label} colisionan (máscara real)`);
         }
       }
-    }
+    });
     sh.pieces.forEach(p => {
       delete p.__mask;
       delete p.__mw;
@@ -11197,11 +11148,7 @@ async function nestPieces(pieces, W, H, gap, onProgress) {
       delete p.__cy;
     });
   });
-  if (errors.length) {
-    console.error('NESTING ERRORS:', errors);
-    sheets._errors = errors;
-  }
-  return sheets;
+  return errors;
 }
 /* (v79) eliminado __ROTULA_ENGINE__/__engineOn/nestPiecesEngine: motor remoto experimental
    (localhost:8787) nunca invocado desde ninguna ruta de código. */
@@ -11378,16 +11325,29 @@ function _sheetsHaveOverlap(sheets) {
    reales; ~10-11% menos altura que _shelfPack en trabajos de altura uniforme).
    NO interbloquea formas (eso solo lo hace el NFP); recupera el hueco entre filas, no el
    hueco entre siluetas de letras. */
-function _skylinePack(parts, binW, binH, gap) {
-  const g = gap || 0;
-  const flat = [];
+/* Cada pieza × su cantidad, reducida a un rectángulo {id, w0, h0}: es lo único que
+   necesitan los dos empaquetadores deterministas (skyline y shelf). */
+function flattenPartsToRects(parts) {
+  const rects = [];
   for (const p of parts) {
     let mnx = 1e9, mny = 1e9, mxx = -1e9, mxy = -1e9;
     for (const q of (p.polygon || [])) { if (q.x < mnx) mnx = q.x; if (q.y < mny) mny = q.y; if (q.x > mxx) mxx = q.x; if (q.y > mxy) mxy = q.y; }
     const w0 = Math.max(0.1, mxx - mnx), h0 = Math.max(0.1, mxy - mny);
-    const n = Math.max(1, p.quantity || 1);
-    for (let k = 0; k < n; k++) flat.push({ id: p.id, w0, h0 });
+    const copies = Math.max(1, p.quantity || 1);
+    for (let k = 0; k < copies; k++) rects.push({ id: p.id, w0, h0 });
   }
+  return rects;
+}
+/* Rectángulo colocado, en el formato que espera el resto de la app. */
+function placedRect(id, x, y, w, h, rotation) {
+  return {
+    id, x, y, w, h, rotation,
+    polygon: [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }]
+  };
+}
+function _skylinePack(parts, binW, binH, gap) {
+  const g = gap || 0;
+  const flat = flattenPartsToRects(parts);
   flat.sort((a, b) => (b.h0 - a.h0) || (b.w0 - a.w0)); // altura desc, luego ancho desc (determinista)
   const sheets = [];
   let sky = [{ x: 0, y: 0, w: binW }];
@@ -11421,7 +11381,7 @@ function _skylinePack(parts, binW, binH, gap) {
     const posR = findPos(it.h0, it.w0);
     if (posR && (!pos || posR.y < pos.y - 1e-9)) { pos = posR; w = it.h0; h = it.w0; rot = 90; }
     if (!pos) return false;
-    cur.push({ id: it.id, x: pos.x, y: pos.y, w, h, rotation: rot, polygon: [{ x: pos.x, y: pos.y }, { x: pos.x + w, y: pos.y }, { x: pos.x + w, y: pos.y + h }, { x: pos.x, y: pos.y + h }] });
+    cur.push(placedRect(it.id, pos.x, pos.y, w, h, rot));
     addRect(pos.x, pos.y, w + g, h + g); return true;
   };
   for (const it of flat) {
@@ -11429,9 +11389,8 @@ function _skylinePack(parts, binW, binH, gap) {
       if (cur.length) { sheets.push(cur); cur = []; }
       sky = [{ x: 0, y: 0, w: binW }];
       if (!place(it)) { // pieza mayor que la hoja: colocar igual en 0,0 (no perder piezas)
-        const w = it.w0, h = it.h0;
-        cur.push({ id: it.id, x: 0, y: 0, w, h, rotation: 0, polygon: [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }] });
-        addRect(0, 0, w + g, h + g);
+        cur.push(placedRect(it.id, 0, 0, it.w0, it.h0, 0));
+        addRect(0, 0, it.w0 + g, it.h0 + g);
       }
     }
   }
@@ -11440,14 +11399,7 @@ function _skylinePack(parts, binW, binH, gap) {
 }
 function _shelfPack(parts, binW, binH, gap) {
   const g = gap || 0;
-  const flat = [];
-  for (const p of parts) {
-    let mnx = 1e9, mny = 1e9, mxx = -1e9, mxy = -1e9;
-    for (const q of (p.polygon || [])) { if (q.x < mnx) mnx = q.x; if (q.y < mny) mny = q.y; if (q.x > mxx) mxx = q.x; if (q.y > mxy) mxy = q.y; }
-    const w0 = Math.max(0.1, mxx - mnx), h0 = Math.max(0.1, mxy - mny);
-    const n = Math.max(1, p.quantity || 1);
-    for (let k = 0; k < n; k++) flat.push({ id: p.id, w0, h0 });
-  }
+  const flat = flattenPartsToRects(parts);
   flat.sort((a, b) => b.h0 - a.h0); // más altas primero → filas más limpias
   const sheets = [];
   let cur = [], x = 0, y = 0, rowH = 0;
@@ -11467,26 +11419,13 @@ function _shelfPack(parts, binW, binH, gap) {
       }
       if (y + h > binH + 1e-6) pushSheet();
     }
-    const px = x, py = y;
-    cur.push({
-      id: it.id, x: px, y: py, w: w, h: h, rotation: rot,
-      polygon: [{ x: px, y: py }, { x: px + w, y: py }, { x: px + w, y: py + h }, { x: px, y: py + h }]
-    });
+    cur.push(placedRect(it.id, x, y, w, h, rot));
     x += w + g;
     if (h > rowH) rowH = h;
   }
   pushSheet();
   return sheets;
 }
-/* ── Compuerta de complejidad del motor NFP (pura, testeable en Node) ──────────────
-   Decide si un trabajo es seguro para el motor NFP (O(n²) en piezas, ~cuadrático en
-   vértices de contorno) o si debe caer a empaquetado determinista para no congelar la UI.
-   Umbral por complejidad de CONTORNO, no solo por conteo:
-     · alguna forma de >30 vértices            → 40 piezas
-     · media de vértices ≤16 (y máx ≤30)        → 120 piezas
-     · banda intermedia (media >16, máx ≤30)    → 80 piezas  (interpolación conservadora)
-   La media se pondera por quantity (cada instancia se coloca). Devuelve
-   { cap, overCap, avgVerts, maxVerts, total }. Sin efectos secundarios. */
 /* ── Decimación segura de contornos en mm (v79) ────────────────────────────────
    RDP con PRESUPUESTO de desviación acumulada (budgetMM) y guarda de área ≥98%.
    La desviación puede ir hacia DENTRO del arte: el motor la compensa inflando el
@@ -11533,6 +11472,15 @@ function _safeDecimateMM(contour, budgetMM) {
     return cur.length >= 3 ? cur : contour;
   } catch (e) { return contour; }
 }
+/* ── Compuerta de complejidad del motor NFP (pura, testeable en Node) ──────────────
+   Decide si un trabajo es seguro para el motor NFP (O(n²) en piezas, ~cuadrático en
+   vértices de contorno) o si debe caer a empaquetado determinista para no congelar la UI.
+   Umbral por complejidad de CONTORNO, no solo por conteo:
+     · alguna forma de >30 vértices            → 40 piezas
+     · media de vértices ≤16 (y máx ≤30)        → 120 piezas
+     · banda intermedia (media >16, máx ≤30)    → 80 piezas  (interpolación conservadora)
+   La media se pondera por quantity (cada instancia se coloca). Devuelve
+   { cap, overCap, avgVerts, maxVerts, total }. Sin efectos secundarios. */
 function nfpComplexityGate(parts, totalPieces) {
   let vSum = 0, vCnt = 0, vMax = 0;
   for (const p of (parts || [])) {
@@ -12045,6 +11993,91 @@ function _splitPathSubpaths(d) {
   return subs;
 }
 const _PLCACHE = new Map();
+const ELLIPSE_MIN_SAMPLES = 32;
+/* Copia las polilíneas trasladadas al hueco donde está colocada la pieza, conservando
+   los metadatos (capa/nombre de capa) que viajan como propiedades del array. */
+function translatePolylines(polylines, dx, dy) {
+  return polylines.map(pl => {
+    const moved = pl.map(p => ({ x: p.x + dx, y: p.y + dy }));
+    moved.capa = pl.capa;
+    moved.layer = pl.layer;
+    return moved;
+  });
+}
+/* Muestreo de una elipse (círculo si rx === ry) con paso ≈ FLATTEN_STEP_MM en la placa. */
+function sampleEllipsePoints(cx, cy, rx, ry, fitScale, toMM) {
+  const perimeter = Math.PI * (rx + ry);
+  const steps = Math.max(ELLIPSE_MIN_SAMPLES, Math.ceil(perimeter * fitScale / FLATTEN_STEP_MM));
+  const pts = [];
+  for (let i = 0; i <= steps; i++) {
+    const angle = i / steps * 2 * Math.PI;
+    pts.push(toMM(cx + rx * Math.cos(angle), cy + ry * Math.sin(angle)));
+  }
+  return pts;
+}
+/* Aplana un <path> subtrazo a subtrazo con getPointAtLength (única forma fiable de
+   seguir curvas y arcos). `maxSamples` acota el coste en las rutas interactivas. */
+function samplePathSubpaths(el, ctx) {
+  const out = [];
+  for (const sub of _splitPathSubpaths(el.getAttribute("d") || "")) {
+    const probe = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    probe.setAttribute("d", sub);
+    el.parentNode.appendChild(probe);
+    try {
+      const len = probe.getTotalLength();
+      if (len > 0) {
+        const stepVB = FLATTEN_STEP_MM / Math.max(0.0001, ctx.fitScale);
+        let steps = Math.max(8, Math.ceil(len / stepVB));
+        if (ctx.maxSamples && steps > ctx.maxSamples) steps = ctx.maxSamples;
+        const poly = [];
+        for (let i = 0; i <= steps; i++) {
+          const p = probe.getPointAtLength(i / steps * len);
+          poly.push(ctx.toMM(p.x, p.y));
+        }
+        // un subtrazo cerrado ("…Z") debe volver al punto de partida
+        if (/[zZ]\s*$/.test(sub)) {
+          const first = poly[0], last = poly[poly.length - 1];
+          if (first && last && (Math.abs(first.x - last.x) > 0.001 || Math.abs(first.y - last.y) > 0.001)) poly.push(first);
+        }
+        out.push(poly);
+      }
+    } catch (e) {}
+    el.parentNode.removeChild(probe);
+  }
+  return out;
+}
+/* Una función por forma SVG: devuelve las polilíneas (en mm de placa) que la representan.
+   `ctx.toMM(x, y)` lleva ya aplicada la matriz del elemento y el encaje en el viewBox. */
+const PLACED_SHAPE_SAMPLERS = {
+  rect(el, ctx) {
+    const x = ctx.num(el, "x"), y = ctx.num(el, "y"), w = ctx.num(el, "width"), h = ctx.num(el, "height");
+    if (!(w > 0 && h > 0)) return [];
+    return [[ctx.toMM(x, y), ctx.toMM(x + w, y), ctx.toMM(x + w, y + h), ctx.toMM(x, y + h), ctx.toMM(x, y)]];
+  },
+  circle(el, ctx) {
+    const r = ctx.num(el, "r");
+    if (!(r > 0)) return [];
+    return [sampleEllipsePoints(ctx.num(el, "cx"), ctx.num(el, "cy"), r, r, ctx.fitScale, ctx.toMM)];
+  },
+  ellipse(el, ctx) {
+    const rx = ctx.num(el, "rx"), ry = ctx.num(el, "ry");
+    if (!(rx > 0 && ry > 0)) return [];
+    return [sampleEllipsePoints(ctx.num(el, "cx"), ctx.num(el, "cy"), rx, ry, ctx.fitScale, ctx.toMM)];
+  },
+  polygon(el, ctx) {
+    const nums = (el.getAttribute("points") || "").trim().split(/[\s,]+/).map(parseFloat).filter(v => !isNaN(v));
+    if (nums.length < 4) return [];
+    const pts = [];
+    for (let i = 0; i < nums.length - 1; i += 2) pts.push(ctx.toMM(nums[i], nums[i + 1]));
+    if (el.tagName.toLowerCase() === "polygon" && pts.length) pts.push(pts[0]);
+    return [pts];
+  },
+  line(el, ctx) {
+    return [[ctx.toMM(ctx.num(el, "x1"), ctx.num(el, "y1")), ctx.toMM(ctx.num(el, "x2"), ctx.num(el, "y2"))]];
+  },
+  path: samplePathSubpaths
+};
+PLACED_SHAPE_SAMPLERS.polyline = PLACED_SHAPE_SAMPLERS.polygon;
 function pieceToPolylinesMM(piece, maxN) {
   const slotW = piece.placedW,
     slotH = piece.placedH;
@@ -12080,21 +12113,10 @@ function pieceToPolylinesMM(piece, maxN) {
   }
   const _sig = piece.svgRaw + "|" + piece.viewBox + "|" + drawW + "x" + drawH + "|" + (piece.rotated ? piece.rotation || 0 : 0) + "|" + (piece.capa || "corte") + "|" + (maxN || 0);
   const _cached = _PLCACHE.get(_sig);
-  if (_cached) {
-    const polylines = _cached.map(s => {
-      const o = s.map(p => ({
-        x: p.x + drawX,
-        y: p.y + drawY
-      }));
-      o.capa = s.capa;
-      o.layer = s.layer;
-      return o;
-    });
-    return {
-      polylines,
-      label: piece.label
-    };
-  }
+  if (_cached) return {
+    polylines: translatePolylines(_cached, drawX, drawY),
+    label: piece.label
+  };
   const vb = piece.viewBox.split(/[\s,]+/).map(Number);
   const cx = vb[0] + vb[2] / 2,
     cy = vb[1] + vb[3] / 2;
@@ -12158,132 +12180,35 @@ function pieceToPolylinesMM(piece, maxN) {
     }
     return null;
   };
+  // demo-10: `maxN` acota las muestras por subtrazo en las rutas interactivas
+  // (preview/editor/estimado). getPointAtLength es ~O(complejidad) por llamada, así que un
+  // ornamento con un trazo larguísimo generaba ~26000 muestras → bloqueo síncrono de ~9 s.
+  // La exportación DXF/SVG llama SIN maxN ⇒ sigue a precisión completa.
+  const attrNum = (el, name) => parseFloat(el.getAttribute(name)) || 0;
   for (const el of elements) {
     const ctm = el.getCTM();
     if (!ctm) continue;
+    const sampler = PLACED_SHAPE_SAMPLERS[el.tagName.toLowerCase()];
+    if (!sampler) continue;
     const elCapa = capaOfEl(el);
     const elLayer = layerOfEl(el);
-    const apply = (px, py) => {
-      const x = ctm.a * px + ctm.c * py + ctm.e;
-      const y = ctm.b * px + ctm.d * py + ctm.f;
-      return vb2mm(x, y);
+    const ctx = {
+      fitScale,
+      maxSamples: maxN,
+      num: attrNum,
+      toMM: (px, py) => vb2mm(ctm.a * px + ctm.c * py + ctm.e, ctm.b * px + ctm.d * py + ctm.f)
     };
-    const tag = el.tagName.toLowerCase();
-    if (tag === "rect") {
-      const x = parseFloat(el.getAttribute("x")) || 0;
-      const y = parseFloat(el.getAttribute("y")) || 0;
-      const w = parseFloat(el.getAttribute("width")) || 0;
-      const h = parseFloat(el.getAttribute("height")) || 0;
-      if (w > 0 && h > 0) {
-        const arr = [apply(x, y), apply(x + w, y), apply(x + w, y + h), apply(x, y + h), apply(x, y)];
-        arr.capa = elCapa;
-        arr.layer = elLayer;
-        polylines.push(arr);
-      }
-    } else if (tag === "circle") {
-      const ccx = parseFloat(el.getAttribute("cx")) || 0;
-      const ccy = parseFloat(el.getAttribute("cy")) || 0;
-      const r = parseFloat(el.getAttribute("r")) || 0;
-      if (r > 0) {
-        const N = Math.max(32, Math.ceil(2 * Math.PI * r * fitScale / FLATTEN_STEP_MM));
-        const pts = [];
-        for (let i = 0; i <= N; i++) {
-          const a = i / N * 2 * Math.PI;
-          pts.push(apply(ccx + r * Math.cos(a), ccy + r * Math.sin(a)));
-        }
-        pts.capa = elCapa;
-        pts.layer = elLayer;
-        polylines.push(pts);
-      }
-    } else if (tag === "ellipse") {
-      const ccx = parseFloat(el.getAttribute("cx")) || 0;
-      const ccy = parseFloat(el.getAttribute("cy")) || 0;
-      const rx = parseFloat(el.getAttribute("rx")) || 0;
-      const ry = parseFloat(el.getAttribute("ry")) || 0;
-      if (rx > 0 && ry > 0) {
-        const perim = Math.PI * (rx + ry);
-        const N = Math.max(32, Math.ceil(perim * fitScale / FLATTEN_STEP_MM));
-        const pts = [];
-        for (let i = 0; i <= N; i++) {
-          const a = i / N * 2 * Math.PI;
-          pts.push(apply(ccx + rx * Math.cos(a), ccy + ry * Math.sin(a)));
-        }
-        pts.capa = elCapa;
-        pts.layer = elLayer;
-        polylines.push(pts);
-      }
-    } else if (tag === "polygon" || tag === "polyline") {
-      const raw = (el.getAttribute("points") || "").trim().split(/[\s,]+/).map(parseFloat).filter(n => !isNaN(n));
-      if (raw.length >= 4) {
-        const pts = [];
-        for (let i = 0; i < raw.length - 1; i += 2) pts.push(apply(raw[i], raw[i + 1]));
-        if (tag === "polygon" && pts.length) pts.push(pts[0]);
-        pts.capa = elCapa;
-        pts.layer = elLayer;
-        polylines.push(pts);
-      }
-    } else if (tag === "line") {
-      const x1 = parseFloat(el.getAttribute("x1")) || 0;
-      const y1 = parseFloat(el.getAttribute("y1")) || 0;
-      const x2 = parseFloat(el.getAttribute("x2")) || 0;
-      const y2 = parseFloat(el.getAttribute("y2")) || 0;
-      const arr = [apply(x1, y1), apply(x2, y2)];
-      arr.capa = elCapa;
-        arr.layer = elLayer;
-      polylines.push(arr);
-    } else if (tag === "path") {
-      const d = el.getAttribute("d") || "";
-      const subs = _splitPathSubpaths(d);
-      for (const sub of subs) {
-        const tmp = document.createElementNS(ns, "path");
-        tmp.setAttribute("d", sub);
-        el.parentNode.appendChild(tmp);
-        try {
-          const len = tmp.getTotalLength();
-          if (len > 0) {
-            const stepVB = FLATTEN_STEP_MM / Math.max(0.0001, fitScale);
-            // demo-10: cap OPCIONAL de muestras por subtrazo (solo rutas interactivas:
-            // preview/editor/estimado). getPointAtLength es ~O(complejidad) por llamada, asi
-            // que un ornamento con un trazo larguisimo generaba ~26000 muestras -> bloque
-            // sincrono de ~9s (una sola llamada, ininterrumpible). La exportacion DXF/SVG
-            // llama SIN maxN => sigue a precision completa.
-            let N = Math.max(8, Math.ceil(len / stepVB));
-            if (maxN && N > maxN) N = maxN;
-            const poly = [];
-            for (let i = 0; i <= N; i++) {
-              const p = tmp.getPointAtLength(i / N * len);
-              poly.push(apply(p.x, p.y));
-            }
-            if (/[zZ]\s*$/.test(sub)) {
-              const a = poly[0],
-                b = poly[poly.length - 1];
-              if (a && b && (Math.abs(a.x - b.x) > 0.001 || Math.abs(a.y - b.y) > 0.001)) {
-                poly.push(a);
-              }
-            }
-            poly.capa = elCapa;
-        poly.layer = elLayer;
-            polylines.push(poly);
-          }
-        } catch (e) {}
-        el.parentNode.removeChild(tmp);
-      }
+    for (const pts of sampler(el, ctx)) {
+      pts.capa = elCapa;
+      pts.layer = elLayer;
+      polylines.push(pts);
     }
   }
   document.body.removeChild(wrap);
   if (_PLCACHE.size > 1500) _PLCACHE.clear();
   _PLCACHE.set(_sig, polylines);
-  const out = polylines.map(s => {
-    const o = s.map(p => ({
-      x: p.x + drawX,
-      y: p.y + drawY
-    }));
-    o.capa = s.capa;
-    o.layer = s.layer;
-    return o;
-  });
   return {
-    polylines: out,
+    polylines: translatePolylines(polylines, drawX, drawY),
     label: piece.label
   };
 }
