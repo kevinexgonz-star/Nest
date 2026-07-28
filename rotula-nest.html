@@ -1,7 +1,19 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v95 — Nesting · Editor · Capas                  ║
+     ║  ROTULA NEST v96 — Nesting · Editor · Capas                  ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v96: IDENTIFICAR POR COLOR, REFERENCIAS DEBAJO. Rotular la  ║
+     ║  referencia ENCIMA de cada pieza solo se aguanta con pocas   ║
+     ║  piezas: en un lote grande la placa se convertia en una      ║
+     ║  mancha de letras y no se leia ninguna. Ahora cada pieza va  ║
+     ║  RELLENA del color de su pedido (tinte claro, el trazo de    ║
+     ║  corte sigue en el color pleno encima) y la correspondencia  ║
+     ║  color -> referencia se lee UNA sola vez en una banda debajo ║
+     ║  de la placa, con las uds de cada pedido. Igual en el lienzo ║
+     ║  y en el PDF de vista previa. El rotulo por pieza queda como ║
+     ║  opcion (casilla "Ref.", apagada). Ademas la paleta ya no    ║
+     ║  tiene tope: pasados los 18 colores fijos se generan tonos   ║
+     ║  por angulo aureo, asi dos pedidos nunca comparten color.    ║
      ║  v95: HERRAMIENTA LIMPIA. Fuera las pestanas Materiales,     ║
      ║  Stock e Historial y todo el presupuesto en euros (resumen   ║
      ║  economico, precio por placa, coste por pieza, material      ║
@@ -8871,6 +8883,23 @@ const refOf = p => {
    El hash por sí solo COLISIONA (dos pedidos del mismo lote con el mismo color hacen
    inútil la identificación), así que cuando se conoce el conjunto completo de piezas se
    reparte la paleta por índice con orderColorMap() y se pasa ese mapa. */
+/* v96: paleta SIN TOPE. Con más pedidos que colores (i % 18) dos referencias distintas
+   compartían color, y desde v96 el color es lo ÚNICO que identifica la pieza en la placa
+   (ya no se rotula la referencia encima), así que una colisión hace ilegible la vista
+   previa justo en los lotes grandes. Pasada la paleta fija se generan tonos por ÁNGULO
+   ÁUREO (137.508°, el reparto que más separa matices consecutivos) alternando saturación
+   y luminosidad. Siguen siendo oscuros: el trazo de corte se pinta en este color pleno. */
+const _hslHex = (h, s, l) => {
+  h = (h % 360 + 360) % 360;
+  s /= 100;
+  l /= 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s,
+    x = c * (1 - Math.abs(h / 60 % 2 - 1)),
+    m = l - c / 2;
+  const t = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return "#" + t.map(v => Math.round((v + m) * 255).toString(16).padStart(2, "0")).join("");
+};
+const extraOrderColor = k => _hslHex(k * 137.508 + 47, k % 2 ? 76 : 60, 30 + k % 3 * 8);
 function orderColorMap(pieces) {
   const refs = [];
   (pieces || []).forEach(p => {
@@ -8881,7 +8910,7 @@ function orderColorMap(pieces) {
   // lienzo y el PDF exportado coinciden pieza a pieza.
   refs.sort((a, b) => a.localeCompare(b, "es", { numeric: true, sensitivity: "base" }));
   const m = new Map();
-  refs.forEach((r, i) => m.set(r, SRC_PALETTE[i % SRC_PALETTE.length]));
+  refs.forEach((r, i) => m.set(r, i < SRC_PALETTE.length ? SRC_PALETTE[i] : extraOrderColor(i - SRC_PALETTE.length)));
   return m;
 }
 const orderColorOf = (p, map) => {
@@ -8919,6 +8948,22 @@ function shadeHex(hex, f) {
   const ch = v => Math.max(0, Math.min(255, Math.round(v * (1 + f))));
   return "#" + [n >> 16 & 255, n >> 8 & 255, n & 255].map(v => ch(v).toString(16).padStart(2, "0")).join("");
 }
+/* v96: tinte claro — mezcla hacia BLANCO (f=0 color pleno, f=1 blanco). shadeHex()
+   multiplica y por eso NO aclara los canales que valen 0 (un azul puro seguía siendo azul
+   puro por mucho que se subiera f); el relleno de identificación necesita un pastel real
+   sobre el que se lea el trazo de corte, que va en el color pleno. */
+function tintHex(hex, f) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return "#eeeeee";
+  const n = parseInt(m[1], 16),
+    k = Math.max(0, Math.min(1, f));
+  const ch = v => Math.round(v + (255 - v) * k);
+  return "#" + [n >> 16 & 255, n >> 8 & 255, n & 255].map(v => ch(v).toString(16).padStart(2, "0")).join("");
+}
+/* Mezcla del relleno de identificación: bastante color para agrupar de un vistazo,
+   bastante claro para que el corte (color pleno) y las demás capas se lean encima.
+   Compartido por el lienzo y el PDF → lo que se ve en pantalla es lo que se imprime. */
+const ORDER_FILL_TINT = 0.55;
 const _ACI_TABLE = [[1, 255, 0, 0], [2, 255, 255, 0], [3, 0, 255, 0], [4, 0, 255, 255], [5, 0, 0, 255], [6, 255, 0, 255], [7, 0, 0, 0], [8, 128, 128, 128], [30, 255, 127, 0], [92, 0, 128, 64], [174, 0, 63, 127], [14, 76, 0, 0]];
 function hexToACI(hex) {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
@@ -12316,9 +12361,13 @@ function buildSVG(sheet, plateW, plateH, sheetIndex, capas) {
 /* ══ v94: EXPORTACIÓN PDF — vista previa del nesting para producción/panel ═══════════
    Genera un PDF vectorial a ESCALA REAL (1 mm = 1 mm), una página por placa:
      · contorno de la placa (o del retal),
-     · cada pieza con su geometría de corte trazada en el COLOR DE SU PEDIDO,
-     · la REFERENCIA del pedido rotulada sobre cada pieza en ese mismo color,
-     · cabecera con material/grosor y leyenda referencia → color (uds. por pedido).
+     · cada pieza RELLENA con el color de su pedido (v96),
+     · su geometría de corte trazada encima en ese mismo color pleno,
+     · cabecera con material/grosor y, DEBAJO de la placa, la lista de referencias
+       (muestra de color + referencia + uds).
+   v96: la referencia ya NO se rotula sobre cada pieza. Con lotes de muchas piezas la placa
+   se llenaba de letras y no se leía nada; ahora la pieza se identifica por su COLOR DE
+   RELLENO y la correspondencia color → referencia se lee una sola vez, debajo.
    Es lo que el operario mira para identificar de qué pedido es cada pieza.
    Escritor PDF mínimo y autocontenido (sin librerías): objetos, xref y trailer con
    desplazamientos de BYTES exactos — por eso el archivo se construye en latin-1 y se
@@ -12343,79 +12392,34 @@ function buildNestPDF(sheets, plateW, plateH, capas, meta) {
     const bw = sh._retal ? sh._binW : plateW;
     const bh = sh._retal ? sh._binH : plateH;
     const geo = extractSheetGeometry(sh, capas);
-    // Coordenadas: la app usa y hacia abajo con origen arriba-izquierda de la placa;
-    // el PDF usa y hacia arriba. Se convierte punto a punto (sin matrices) y se reserva
-    // la banda de cabecera por encima de la placa.
-    const X = x => _pdfNum(x * PDF_MM);
-    const Y = y => _pdfNum((bh - y) * PDF_MM);
-    const ops = [];
-    // Contorno de la placa: 're' toma esquina inferior-izquierda (que es y=bh en la app).
-    ops.push("0.6 w 0.75 0.78 0.82 RG");
-    ops.push(X(0) + " " + Y(bh) + " " + _pdfNum(bw * PDF_MM) + " " + _pdfNum(bh * PDF_MM) + " re S");
-    // ── geometría de corte, agrupada por color de pedido ──
-    const labels = [];
+    /* ── v96: leyenda y bandas se MIDEN ANTES de dibujar ───────────────────────────
+       La lista de referencias va DEBAJO de la placa, así que su altura desplaza el origen
+       de la placa dentro de la página: hay que conocerla antes de convertir coordenadas. */
     const legend = new Map();
     geo.forEach(g => {
-      const p = g.piece;
-      const ref = refOf(p);
-      const col = orderColorOf(p, cmap) || "#1f2937";
-      if (ref) {
-        const e = legend.get(ref) || { ref, col, n: 0 };
-        e.n++;
-        legend.set(ref, e);
-      }
-      const draw = (pts, hex, wmm) => {
-        if (!pts || pts.length < 2) return;
-        const [r, gg, b] = _pdfHexRGB(hex);
-        ops.push(_pdfNum(wmm * PDF_MM) + " w " + _pdfNum(r) + " " + _pdfNum(gg) + " " + _pdfNum(b) + " RG");
-        let d = X(pts[0].x) + " " + Y(pts[0].y) + " m";
-        const closed = isClosedPts(pts);
-        const last = closed ? pts.length - 1 : pts.length;
-        for (let i = 1; i < last; i++) d += " " + X(pts[i].x) + " " + Y(pts[i].y) + " l";
-        ops.push(d + (closed ? " h S" : " S"));
-      };
-      // Corte → color del pedido. Otras capas (hendido/taladro/cajeado) → su color de capa.
-      g.polylines.forEach(pl => {
-        const cid = pl.capa || p.capa || "corte";
-        const c = capaById(capas, cid);
-        draw(pl, cid === "corte" ? col : c.color, 0.35);
-      });
-      g.offsets.forEach(off => {
-        const c = capaById(capas, off.capa);
-        off.polys.forEach(pts => draw(pts, shadeHex(c.color, -0.4), 0.25));
-      });
-      // Rótulo: mismo cálculo que el lienzo → la vista previa y el PDF coinciden.
-      const lw = p.placedW || p.w,
-        lh = p.placedH || p.h;
-      const size = refLabelSize(ref, lw, lh);
-      if (size) labels.push({ ref, col, cx: p.x + lw / 2, cy: p.y + lh / 2, size });
+      const ref = refOf(g.piece);
+      if (!ref) return;
+      const e = legend.get(ref) || { ref, col: orderColorOf(g.piece, cmap) || "#1f2937", n: 0 };
+      e.n++;
+      legend.set(ref, e);
     });
-    // ── rótulos de referencia (encima del corte) ──
-    labels.forEach(L => {
-      const [r, g2, b] = _pdfHexRGB(L.col);
-      const sPt = L.size * PDF_MM;
-      const wPt = L.ref.length * 0.6 * sPt; // Helvetica-Bold ~0.6 em/carácter
-      const xPt = L.cx * PDF_MM - wPt / 2;
-      const yPt = (bh - L.cy) * PDF_MM - sPt * 0.35; // centrado óptico
-      ops.push("BT /F2 " + _pdfNum(sPt) + " Tf " + _pdfNum(r) + " " + _pdfNum(g2) + " " + _pdfNum(b) + " rg " + _pdfNum(xPt) + " " + _pdfNum(yPt) + " Td (" + _pdfTxt(L.ref) + ") Tj ET");
-    });
-    /* ── cabecera: título, material/grosor, placa n/total y leyenda de pedidos ──
-       Los cuerpos se escalan con el ANCHO de la placa: a tamaño fijo (8-16 mm) el texto
+    /* Los cuerpos se escalan con el ANCHO de la placa: a tamaño fijo (8-16 mm) el texto
        era ilegible sobre una placa de 2 m impresa o vista al completo. */
     const sTitle = Math.max(14, bw / 38),
       sSub = Math.max(8, bw / 78),
       sLeg = Math.max(9, bw / 62);
     const MARG = Math.max(8, bw / 200);
+    const SW = sLeg * 1.25; // lado de la muestra de color
     const entries = [...legend.values()].sort((a, b) => a.ref.localeCompare(b.ref, "es", { numeric: true }));
-    // Reparto de la leyenda en filas (muestra de color + "REF (uds)").
+    // Reparto de la lista en filas (muestra de color + "REF ×uds").
     const legRows = [];
     {
       const avail = bw - 2 * MARG;
       let row = [],
         rw = 0;
       entries.forEach(e => {
-        const txt = e.ref + " (" + e.n + ")";
-        const w = sLeg * 1.1 + sLeg * 0.4 + txt.length * 0.6 * sLeg + sLeg * 0.9; // muestra + hueco + texto + separación
+        const txt = e.ref + "  \xd7" + e.n;
+        const w = SW + sLeg * 0.45 + txt.length * 0.6 * sLeg + sLeg * 1.1; // muestra + hueco + texto + separación
         if (rw + w > avail && row.length) {
           legRows.push(row);
           row = [];
@@ -12426,8 +12430,64 @@ function buildNestPDF(sheets, plateW, plateH, capas, meta) {
       });
       if (row.length) legRows.push(row);
     }
-    const headerMM = MARG + sTitle * 1.25 + sSub * 1.7 + (legRows.length ? legRows.length * sLeg * 1.7 + sLeg * 0.5 : 0) + MARG;
-    const topPt = (bh + headerMM) * PDF_MM;
+    const headerMM = MARG + sTitle * 1.25 + sSub * 1.7 + MARG * 0.5;
+    const footerMM = legRows.length ? MARG * 0.85 + sLeg * 1.5 + legRows.length * sLeg * 1.95 + MARG : MARG * 0.6;
+    // Coordenadas: la app usa y hacia abajo con origen arriba-izquierda de la placa;
+    // el PDF usa y hacia arriba. Se convierte punto a punto (sin matrices): la placa se
+    // apoya sobre la banda de referencias y deja la cabecera por encima.
+    const X = x => _pdfNum(x * PDF_MM);
+    const Y = y => _pdfNum((footerMM + bh - y) * PDF_MM);
+    const ops = [];
+    // Contorno de la placa: 're' toma esquina inferior-izquierda (que es y=bh en la app).
+    ops.push("0.6 w 0.75 0.78 0.82 RG");
+    ops.push(X(0) + " " + Y(bh) + " " + _pdfNum(bw * PDF_MM) + " " + _pdfNum(bh * PDF_MM) + " re S");
+    /* ── geometría: primero TODOS los rellenos, después TODOS los trazos ────────────
+       En dos pasadas para que el relleno de una pieza no tape el contorno de la vecina
+       (el nesting las deja a tocar). */
+    const fillOps = [],
+      strokeOps = [];
+    geo.forEach(g => {
+      const p = g.piece;
+      const col = orderColorOf(p, cmap) || "#1f2937";
+      const capaOf = pl => pl.capa || p.capa || "corte";
+      /* Relleno de identificación: contornos de CORTE cerrados con regla PAR-IMPAR, así
+         los agujeros y las islas interiores quedan sin rellenar (se ven como huecos
+         reales y no como manchas de color). */
+      const closedCuts = g.polylines.filter(pl => capaOf(pl) === "corte" && pl.length > 3 && isClosedPts(pl));
+      if (closedCuts.length) {
+        const [r, gg, b] = _pdfHexRGB(tintHex(col, ORDER_FILL_TINT));
+        let d = _pdfNum(r) + " " + _pdfNum(gg) + " " + _pdfNum(b) + " rg";
+        closedCuts.forEach(pts => {
+          d += " " + X(pts[0].x) + " " + Y(pts[0].y) + " m";
+          for (let i = 1; i < pts.length - 1; i++) d += " " + X(pts[i].x) + " " + Y(pts[i].y) + " l";
+          d += " h";
+        });
+        fillOps.push(d + " f*");
+      }
+      const draw = (pts, hex, wmm) => {
+        if (!pts || pts.length < 2) return;
+        const [r, gg, b] = _pdfHexRGB(hex);
+        let d = _pdfNum(wmm * PDF_MM) + " w " + _pdfNum(r) + " " + _pdfNum(gg) + " " + _pdfNum(b) + " RG\n";
+        d += X(pts[0].x) + " " + Y(pts[0].y) + " m";
+        const closed = isClosedPts(pts);
+        const last = closed ? pts.length - 1 : pts.length;
+        for (let i = 1; i < last; i++) d += " " + X(pts[i].x) + " " + Y(pts[i].y) + " l";
+        strokeOps.push(d + (closed ? " h S" : " S"));
+      };
+      // Corte → color del pedido. Otras capas (hendido/taladro/cajeado) → su color de capa.
+      g.polylines.forEach(pl => {
+        const cid = capaOf(pl);
+        const c = capaById(capas, cid);
+        draw(pl, cid === "corte" ? col : c.color, 0.35);
+      });
+      g.offsets.forEach(off => {
+        const c = capaById(capas, off.capa);
+        off.polys.forEach(pts => draw(pts, shadeHex(c.color, -0.4), 0.25));
+      });
+    });
+    ops.push(...fillOps, ...strokeOps);
+    // ── cabecera: título y material/grosor/placa n de total ──
+    const topPt = (footerMM + bh + headerMM) * PDF_MM;
     const title = "NESTING" + (meta.matName ? " \xb7 " + meta.matName : "") + (meta.thk ? " \xb7 " + meta.thk + " mm" : "");
     const sub = "Placa " + (si + 1) + " de " + sheets.length + (sh._retal ? " (retal " + Math.round(bw) + "\xd7" + Math.round(bh) + " mm)" : " \xb7 " + Math.round(bw) + "\xd7" + Math.round(bh) + " mm") + (meta.cutId ? " \xb7 " + meta.cutId : "") + " \xb7 " + new Date().toLocaleDateString("es-ES");
     let cy = MARG; // mm consumidos desde el borde superior de la banda
@@ -12435,21 +12495,31 @@ function buildNestPDF(sheets, plateW, plateH, capas, meta) {
     ops.push("BT /F2 " + _pdfNum(sTitle * PDF_MM) + " Tf 0.1 0.1 0.12 rg " + _pdfNum(MARG * PDF_MM) + " " + _pdfNum(baseY(cy + sTitle)) + " Td (" + _pdfTxt(title) + ") Tj ET");
     cy += sTitle * 1.25;
     ops.push("BT /F1 " + _pdfNum(sSub * PDF_MM) + " Tf 0.4 0.42 0.46 rg " + _pdfNum(MARG * PDF_MM) + " " + _pdfNum(baseY(cy + sSub)) + " Td (" + _pdfTxt(sub) + ") Tj ET");
-    cy += sSub * 1.7;
-    legRows.forEach(row => {
-      let lx = MARG;
-      row.forEach(item => {
-        const [r, g2, b] = _pdfHexRGB(item.e.col);
-        const sw = sLeg * 1.1;
-        ops.push(_pdfNum(r) + " " + _pdfNum(g2) + " " + _pdfNum(b) + " rg " + _pdfNum(lx * PDF_MM) + " " + _pdfNum(baseY(cy + sLeg * 1.1)) + " " + _pdfNum(sw * PDF_MM) + " " + _pdfNum(sw * PDF_MM) + " re f");
-        ops.push("BT /F2 " + _pdfNum(sLeg * PDF_MM) + " Tf " + _pdfNum(r) + " " + _pdfNum(g2) + " " + _pdfNum(b) + " rg " + _pdfNum((lx + sw + sLeg * 0.4) * PDF_MM) + " " + _pdfNum(baseY(cy + sLeg)) + " Td (" + _pdfTxt(item.txt) + ") Tj ET");
-        lx += item.w;
+    /* ── pie: REFERENCIAS debajo de la placa ───────────────────────────────────────
+       Una entrada por pedido (no una por pieza): la muestra lleva el color de relleno de
+       sus piezas y el texto va en tinta negra, que se lee mejor que el color sobre papel. */
+    if (legRows.length) {
+      const footY = mm => _pdfNum((footerMM - mm) * PDF_MM); // mm hacia abajo desde el borde inferior de la placa
+      let fy = MARG * 0.85;
+      ops.push("BT /F2 " + _pdfNum(sLeg * 0.9 * PDF_MM) + " Tf 0.45 0.47 0.5 rg " + _pdfNum(MARG * PDF_MM) + " " + footY(fy + sLeg * 0.9) + " Td (" + _pdfTxt("REFERENCIAS \xb7 cada color identifica un pedido") + ") Tj ET");
+      fy += sLeg * 1.5;
+      legRows.forEach(row => {
+        let lx = MARG;
+        row.forEach(item => {
+          const [r, g2, b] = _pdfHexRGB(item.e.col);
+          const [fr, fg, fb] = _pdfHexRGB(tintHex(item.e.col, ORDER_FILL_TINT));
+          // Muestra: el TINTE con que se rellena la pieza + filete del color pleno, que
+          // es el del trazo de corte. Así la muestra reproduce la pieza tal cual se ve.
+          ops.push(_pdfNum(fr) + " " + _pdfNum(fg) + " " + _pdfNum(fb) + " rg " + _pdfNum(0.35 * PDF_MM) + " w " + _pdfNum(r) + " " + _pdfNum(g2) + " " + _pdfNum(b) + " RG " + _pdfNum(lx * PDF_MM) + " " + footY(fy + SW) + " " + _pdfNum(SW * PDF_MM) + " " + _pdfNum(SW * PDF_MM) + " re B");
+          ops.push("BT /F2 " + _pdfNum(sLeg * PDF_MM) + " Tf 0.1 0.1 0.12 rg " + _pdfNum((lx + SW + sLeg * 0.45) * PDF_MM) + " " + footY(fy + sLeg * 0.99) + " Td (" + _pdfTxt(item.txt) + ") Tj ET");
+          lx += item.w;
+        });
+        fy += sLeg * 1.95;
       });
-      cy += sLeg * 1.7;
-    });
+    }
     pages.push({
       wPt: bw * PDF_MM,
-      hPt: (bh + headerMM) * PDF_MM,
+      hPt: (footerMM + bh + headerMM) * PDF_MM,
       content: ops.filter(Boolean).join("\n")
     });
   });
@@ -13358,6 +13428,20 @@ function VectorEditor({
     }));
     return [...m.values()].sort((a, b) => b.count - a.count);
   }, [objects]);
+  /* v96: leyenda color → referencia que se pinta DEBAJO de la placa, la misma que lleva el
+     PDF de vista previa: una entrada por pedido (no por pieza) con su color de relleno y
+     las unidades que hay en el lienzo. Ordenada por referencia (natural: el -2 antes del -10). */
+  const refLegend = React.useMemo(() => {
+    const m = new Map();
+    (objects || []).forEach(o => {
+      const r = o.__ref;
+      if (!r) return;
+      const e = m.get(r) || { ref: r, col: o.__srcColor || "#1f2937", n: 0 };
+      e.n++;
+      m.set(r, e);
+    });
+    return [...m.values()].sort((a, b) => a.ref.localeCompare(b.ref, "es", { numeric: true }));
+  }, [objects]);
   const [sel, setSel] = useState([]);
   const [tool, setTool] = useState("select");
   const [draft, setDraft] = useState(null);
@@ -13369,9 +13453,12 @@ function VectorEditor({
   const [snap, setSnap] = useState(true);
   const [snapSize, setSnapSize] = useState(5);
   const [grid, setGrid] = useState(true);
-  // v94: rótulo de referencia sobre cada pieza (color del pedido). ON: es la forma de
-  // identificar los pedidos en la vista previa que va a producción.
-  const [showRefs, setShowRefs] = useState(true);
+  /* v94: rótulo de referencia sobre cada pieza (color del pedido).
+     v96: arranca APAGADO. Los pedidos se identifican por el COLOR DE RELLENO de la pieza
+     y por la lista de referencias que va debajo de la placa (igual que el PDF de vista
+     previa); rotular encima de cada pieza solo se aguanta con pocas piezas — en un lote
+     grande la placa se convertía en una mancha de letras. Queda como opción. */
+  const [showRefs, setShowRefs] = useState(false);
   const [polyPts, setPolyPts] = useState(null);
   const [marquee, setMarquee] = useState(null);
   const [cur, setCur] = useState({
@@ -14486,6 +14573,12 @@ function VectorEditor({
     // v80: el corte usa el color del archivo de origen (distinguir pedidos) si existe.
     const baseStroke = oc.id === "corte" ? o.__srcColor || "#1f2937" : oc.color;
     const stroke = isDraft ? "#9333ea" : isSel ? "#E6007E" : baseStroke;
+    /* v96: RELLENO de identificación por pedido, el mismo tinte que el PDF de vista previa
+       (lo que se ve en pantalla es lo que se imprime). El color agrupa las piezas de un
+       pedido sin rotular una referencia encima de cada una, que con lotes grandes tapaba
+       la placa de letras. Solo lo llevan las piezas de un pedido (__srcColor); las formas
+       que dibuja el usuario en el editor siguen sin relleno. */
+    const orderFill = !isSel && !isDraft && o.__srcColor ? tintHex(o.__srcColor, ORDER_FILL_TINT) : "none";
     const common = {
       fill: "none",
       stroke,
@@ -14536,7 +14629,8 @@ function VectorEditor({
           style: {
             ...common,
             stroke: c.id === "corte" ? o.__srcColor || "#1f2937" : c.color,
-            fill: "none",
+            // v96: solo el CORTE se rellena; hendido/taladro/cajeado van sueltos encima.
+            fill: c.id === "corte" ? orderFill : "none",
             fillRule: "evenodd"
           }
         });
@@ -14545,7 +14639,7 @@ function VectorEditor({
       d: subsToD(o.subs, true),
       style: {
         ...common,
-        fill: o.type === "text" ? "rgba(31,41,55,0.10)" : "none",
+        fill: o.type === "text" ? "rgba(31,41,55,0.10)" : orderFill,
         fillRule: "evenodd"
       }
     });
@@ -14758,7 +14852,7 @@ function VectorEditor({
     checked: grid,
     onChange: e => setGrid(e.target.checked)
   }), " Rejilla"), React.createElement("label", {
-    title: "Rotula cada pieza con la referencia de su pedido, en el color del pedido",
+    title: "Escribe adem\xE1s la referencia ENCIMA de cada pieza. Con muchas piezas satura la placa: los pedidos ya se identifican por el color de relleno y por la lista de referencias de abajo",
     style: {
       display: "flex",
       alignItems: "center",
@@ -15184,7 +15278,62 @@ function VectorEditor({
     stroke: "#E6007E",
     strokeWidth: 1 * mmPerPx,
     strokeDasharray: 3 * mmPerPx + " " + 2 * mmPerPx
-  }), selectionUI), React.createElement("div", {
+  }), selectionUI),
+  /* v96: LISTA DE REFERENCIAS bajo la placa — la misma que imprime el PDF de vista previa.
+     Cada pieza va rellena del color de su pedido y aquí se lee la correspondencia una sola
+     vez, en vez de repetir la referencia encima de cada pieza. Con muchos pedidos la barra
+     hace scroll en lugar de comerse el lienzo. */
+  refLegend.length > 0 && React.createElement("div", {
+    key: "reflegend",
+    title: "Cada color identifica un pedido \xB7 sale igual en el PDF de vista previa",
+    style: {
+      position: "absolute",
+      left: 10,
+      right: 10,
+      bottom: 34,
+      display: "flex",
+      flexWrap: "wrap",
+      alignItems: "center",
+      gap: "4px 14px",
+      maxHeight: 76,
+      overflowY: "auto",
+      padding: "6px 10px",
+      background: "rgba(255,255,255,0.94)",
+      border: "1px solid #e5e7eb",
+      borderRadius: 8,
+      boxShadow: "0 1px 4px rgba(0,0,0,0.06)",
+      fontSize: 11,
+      color: "#334155"
+    }
+  }, React.createElement("span", {
+    style: {
+      fontSize: 10,
+      fontWeight: 700,
+      color: "#94a3b8",
+      letterSpacing: 0.4
+    }
+  }, "REFERENCIAS"), refLegend.map(e => React.createElement("span", {
+    key: e.ref,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 5,
+      whiteSpace: "nowrap"
+    }
+  }, React.createElement("span", {
+    style: {
+      width: 12,
+      height: 12,
+      flex: "0 0 auto",
+      borderRadius: 3,
+      background: tintHex(e.col, ORDER_FILL_TINT),
+      border: "1.5px solid " + e.col
+    }
+  }), React.createElement("b", null, e.ref), React.createElement("span", {
+    style: {
+      color: "#94a3b8"
+    }
+  }, "\xD7", e.n)))), React.createElement("div", {
     style: {
       position: "absolute",
       left: 10,
@@ -17115,7 +17264,7 @@ function App() {
     style: {
       color: "#E6007E"
     }
-  }, "v95"))))), tab === "nesting" && React.createElement("div", {
+  }, "v96"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",

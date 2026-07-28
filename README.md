@@ -69,7 +69,11 @@ La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQ
 - Editor visual con arrastre, zoom táctil y edición de polilíneas.
 - Capas de corte: Corte / Hendido / Cajeado (con offset) / Taladros / personalizadas.
 - Detección automática de capas por color al importar.
-- Identificación de pedidos en la placa: color + referencia por pedido y PDF de vista previa.
+- Identificación de pedidos en la placa **por color**: cada pieza se rellena del color de su
+  pedido y la lista de referencias (color → referencia + uds.) va **debajo de la placa**, no
+  encima de cada pieza — con lotes grandes rotular pieza a pieza tapaba la placa de letras.
+  El lienzo y el PDF de vista previa pintan exactamente lo mismo. El rótulo sobre cada pieza
+  sigue disponible en la casilla «Ref.» (apagada por defecto).
 - Resumen de material aprovechado (% y m²) por placa.
 - Exportación: DXF R12 y SVG plano por capas; PDF de vista previa a escala real.
 - Persistencia en localStorage.
