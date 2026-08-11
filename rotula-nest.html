@@ -9231,11 +9231,27 @@ function bboxOfPoints(points) {
   if (b.minX === Infinity) return null;
   return { x: b.minX, y: b.minY, w: b.maxX - b.minX, h: b.maxY - b.minY };
 }
-/* Muestreo uniforme y determinista de una polilínea a lo sumo `maxPoints` puntos. */
+/* Reduce una polilínea a `maxPoints` puntos repartidos por LONGITUD DE ARCO.
+   v98: antes se cogía uno de cada N por ÍNDICE, lo que solo funciona si los puntos vienen
+   equiespaciados. Con el aplanado adaptativo la densidad es desigual a propósito (una curva
+   cerrada concentra decenas de puntos y un lado recto gasta dos), así que el muestreo por
+   índice se saltaba tramos rectos ENTEROS: el contorno salía deformado, la prueba de
+   contención fallaba y los huecos de las letras volvían a soltarse como piezas sueltas.
+   Repartiendo por distancia recorrida sale la misma silueta venga como venga la polilínea. */
 function samplePolyline(points, maxPoints) {
   if (points.length <= maxPoints) return points;
-  const out = [], step = points.length / maxPoints;
-  for (let k = 0; k < maxPoints; k++) out.push(points[Math.floor(k * step)]);
+  const n = points.length;
+  const acc = new Float64Array(n);
+  for (let i = 1; i < n; i++) acc[i] = acc[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  const total = acc[n - 1];
+  if (!(total > 0)) return points.slice(0, maxPoints); // polilínea degenerada (todo el mismo punto)
+  const out = [];
+  let j = 0;
+  for (let k = 0; k < maxPoints; k++) {
+    const target = total * k / maxPoints;
+    while (j < n - 1 && acc[j + 1] < target) j++;
+    out.push(points[j]);
+  }
   return out;
 }
 /* Caja mínima que contiene a todas las de la lista (la lista nunca viene vacía). */
@@ -9698,6 +9714,12 @@ function splitCompoundSubpaths(subs) {
   const allIndices = subs.map((_, i) => i);
   return [...groupIndicesByRoot(allIndices, parentOf, total).values()].map(group => group.map(i => subs[i]));
 }
+/* v98: flecha máxima admitida al convertir una curva de Bézier del PDF en polilínea, en mm
+   de dibujo. Se deja MÁS FINA que GEOM_TOL_MM (la del exportador) para que el error del
+   importador quede por debajo del que decide la exportación y no se sumen. El tope de
+   profundidad acota el peor caso a 2^10 = 1024 segmentos por curva. */
+const CUBIC_FLATNESS_MM = 0.02;
+const CUBIC_MAX_DEPTH = 10;
 async function parsePDFVector(arrayBuffer, userScale, unitMul, fit) {
   await ensurePdfJs();
   const pdf = await pdfjsLib.getDocument({
@@ -9763,17 +9785,40 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul, fit) {
     let strokeCol = null,
       fillCol = null;
     let pending = null;
+    /* v98: subdivisión ADAPTATIVA por planitud (antes: paso fijo de 0.6 mm con tope de 64
+       segmentos por curva). El paso fijo trataba igual a una curva casi recta que a una
+       cerrada, y sobre todo el tope facetaba de forma VISIBLE los trazos grandes: una curva
+       de 400 mm salía a 6 mm por segmento. Ahora manda la FLECHA real respecto de la cuerda
+       (≤ CUBIC_FLATNESS_MM): una recta cuesta 1 segmento y una curva cerrada gasta los que
+       necesite. Menos puntos y más fieles. Las coordenadas ya vienen en mm (K = 25.4/72 · um). */
     const flattenCubic = (p0, p1, p2, p3, out) => {
-      const len = Math.hypot(p1.x - p0.x, p1.y - p0.y) + Math.hypot(p2.x - p1.x, p2.y - p1.y) + Math.hypot(p3.x - p2.x, p3.y - p2.y);
-      const N = Math.max(4, Math.min(64, Math.ceil(len / 0.6)));
-      for (let k = 1; k <= N; k++) {
-        const t = k / N,
-          u = 1 - t;
-        out.push({
-          x: u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
-          y: u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y
-        });
-      }
+      const emit = (a0, a1, a2, a3, depth) => {
+        const dx = a3.x - a0.x,
+          dy = a3.y - a0.y;
+        const L2 = dx * dx + dy * dy;
+        let flat;
+        if (L2 < 1e-12) {
+          // cuerda degenerada (la curva vuelve al punto de partida): mide los controles
+          flat = Math.max(Math.hypot(a1.x - a0.x, a1.y - a0.y), Math.hypot(a2.x - a0.x, a2.y - a0.y)) <= CUBIC_FLATNESS_MM;
+        } else {
+          const d = Math.abs((a1.x - a3.x) * dy - (a1.y - a3.y) * dx) + Math.abs((a2.x - a3.x) * dy - (a2.y - a3.y) * dx);
+          flat = d * d <= CUBIC_FLATNESS_MM * CUBIC_FLATNESS_MM * L2;
+        }
+        if (flat || depth >= CUBIC_MAX_DEPTH) {
+          out.push({ x: a3.x, y: a3.y });
+          return;
+        }
+        const mid = (u, v) => ({ x: (u.x + v.x) / 2, y: (u.y + v.y) / 2 });
+        const b01 = mid(a0, a1),
+          b12 = mid(a1, a2),
+          b23 = mid(a2, a3);
+        const b012 = mid(b01, b12),
+          b123 = mid(b12, b23),
+          bm = mid(b012, b123);
+        emit(a0, b01, b012, bm, depth + 1);
+        emit(bm, b123, b23, a3, depth + 1);
+      };
+      emit(p0, p1, p2, p3, 0);
     };
     const buildSubpaths = (ops, coords, m) => {
       const subs = [];
@@ -12049,8 +12094,148 @@ const _rbtn = { width: 26, height: 26, border: '1px solid #ddd', background: '#f
 const FLATTEN_STEP_MM = 0.5;
 /* demo-10: tope de muestras por subtrazo en las rutas INTERACTIVAS (preview/editor/estimado
    de fresado). Acota el coste de getPointAtLength por pieza para que ninguna congele la
-   pestaña. La exportacion CNC (buildDXF/buildSVG) NO usa este tope: va a precision completa. */
+   pestaña. La exportacion CNC (buildDXF/buildSVG) NO usa este tope: no recorta el contorno
+   por numero de muestras, sino por DESVIACION (v98, ver GEOM_TOL_MM mas abajo). */
 const PREVIEW_MAX_SAMPLES = 1200;
+/* ══ v98 · DENSIDAD DE PUNTOS DE LA GEOMETRÍA ════════════════════════════════════════════
+   Hasta v97 TODO contorno se convertía en puntos equiespaciados cada FLATTEN_STEP_MM —curvo
+   o recto— y se escribía tal cual al DXF/SVG. Un lado recto de 200 mm salía con 400 vértices
+   ALINEADOS, y una placa con cuatro rótulos pasaba de 100.000 vértices: DXF de ~3 MB que
+   VCarve arrastra y que la fresadora ya no lee. Tres correcciones, por orden de efecto:
+
+     1. Los subtrazos que YA son polilínea (todos los que deja el importador PDF/AI, que
+        escribe "M x y L x y … Z") se copian VERBATIM: exacto, sin volver a muestrear.
+        Antes se remuestreaban con getPointAtLength, lo que además REDONDEABA las esquinas
+        que caían entre dos muestras y costaba una llamada por punto.
+     2. Todo contorno pasa por una decimación Ramer–Douglas–Peucker: quita los vértices
+        alineados y deja en las curvas los justos, con desviación máxima GARANTIZADA
+        ≤ GEOM_TOL_MM respecto del original (RDP acota el error real, no lo estima).
+     3. Los escritores DXF/SVG dejan de emitir decimales que no existen en la máquina.
+
+   Sobre las cifras: 0.05 mm es la mitad de la precisión típica de una fresadora de pórtico
+   (~0.1 mm) y una décima parte del paso de muestreo anterior, así que la pieza no cambia. */
+const GEOM_TOL_MM = 0.05;
+/* RDP sobre polilínea abierta. Marca los vértices cuya distancia a la cuerda supera eps;
+   los alineados (dentro de eps) desaparecen. Iterativo para no desbordar la pila. */
+function _rdpPts(pts, eps) {
+  if (pts.length < 3) return pts;
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const eps2 = eps * eps;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const seg = stack.pop(),
+      a = seg[0],
+      b = seg[1];
+    if (b - a < 2) continue;
+    const ax = pts[a].x,
+      ay = pts[a].y,
+      dx = pts[b].x - ax,
+      dy = pts[b].y - ay;
+    const L2 = dx * dx + dy * dy;
+    let dmax = -1,
+      imax = -1;
+    for (let i = a + 1; i < b; i++) {
+      const ex = pts[i].x - ax,
+        ey = pts[i].y - ay;
+      // cuerda degenerada (a y b coinciden) → distancia al propio punto a
+      const cr = dx * ey - dy * ex;
+      const d = L2 === 0 ? ex * ex + ey * ey : cr * cr / L2;
+      if (d > dmax) {
+        dmax = d;
+        imax = i;
+      }
+    }
+    if (imax >= 0 && dmax > eps2) {
+      keep[imax] = 1;
+      stack.push([a, imax], [imax, b]);
+    }
+  }
+  const out = [];
+  for (let i = 0; i < pts.length; i++) if (keep[i]) out.push(pts[i]);
+  return out;
+}
+/* Decimación de un contorno en mm. Un anillo CERRADO no se puede pasar por RDP de una vez
+   (primer y último punto coinciden: la "cuerda" es un punto y el reparto degenera), así que
+   se parte en dos mitades por sus vértices extremos en X —mismo criterio que safeSimplifyClip
+   en el motor de nesting— y se vuelve a cerrar. Ante cualquier degeneración se devuelve el
+   contorno ORIGINAL: la corrección manda sobre el ahorro. */
+function decimatePts(pts, eps) {
+  if (!pts || pts.length < 4 || !(eps > 0)) return pts;
+  try {
+    if (!isClosedPts(pts)) {
+      const open = _rdpPts(pts, eps);
+      return open.length >= 2 ? open : pts;
+    }
+    const ring = pts.slice(0, -1); // sin el punto repetido del cierre
+    if (ring.length < 4) return pts;
+    let iMin = 0,
+      iMax = 0;
+    for (let i = 1; i < ring.length; i++) {
+      if (ring[i].x < ring[iMin].x) iMin = i;
+      if (ring[i].x > ring[iMax].x) iMax = i;
+    }
+    const a = Math.min(iMin, iMax),
+      b = Math.max(iMin, iMax);
+    if (a === b) return pts;
+    const h1 = _rdpPts(ring.slice(a, b + 1), eps);
+    const h2 = _rdpPts(ring.slice(b).concat(ring.slice(0, a + 1)), eps);
+    const out = h1.concat(h2.slice(1, -1));
+    if (out.length < 3) return pts;
+    out.push({ x: out[0].x, y: out[0].y }); // vuelve a cerrar
+    return out;
+  } catch (e) {
+    return pts;
+  }
+}
+/* Vértices de un subtrazo que ya es POLILÍNEA: solo M/L/H/V/Z en absoluto (lo que escribe el
+   importador PDF/AI). Devuelve null en cuanto aparece una curva, un arco o un comando
+   relativo —un subtrazo relativo suelto se referiría al final del anterior— y entonces el
+   llamante cae al muestreo con getPointAtLength, que es lo único fiable para curvas. */
+function _polylineSubpathPts(d) {
+  if (!/^[MLHVZ\d\s,.eE+-]*$/.test(d)) return null;
+  const toks = d.match(/[MLHVZ]|[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?/g);
+  if (!toks) return null;
+  const pts = [];
+  let i = 0,
+    x = 0,
+    y = 0,
+    sx = 0,
+    sy = 0,
+    cmd = null,
+    started = false;
+  const num = () => parseFloat(toks[i++]);
+  while (i < toks.length) {
+    if (/^[MLHVZ]$/.test(toks[i])) cmd = toks[i++];
+    else if (cmd === "M") cmd = "L"; // pares de coordenadas extra tras una M son L implícitas
+    // número suelto que ningún comando puede consumir (incluido "…Z 5 5"): trazado
+    // malformado. Se rinde —el llamante muestrea— en vez de girar sin avanzar `i`.
+    else if (cmd !== "L" && cmd !== "H" && cmd !== "V") return null;
+    if (cmd === "Z") {
+      if (started) {
+        pts.push({ x: sx, y: sy });
+        x = sx;
+        y = sy;
+      }
+      continue;
+    }
+    if (i >= toks.length) break;
+    if (cmd === "M" || cmd === "L") {
+      if (i + 1 >= toks.length) break;
+      x = num();
+      y = num();
+    } else if (cmd === "H") x = num();
+    else if (cmd === "V") y = num();
+    if (!isFinite(x) || !isFinite(y)) return null;
+    if (!started) {
+      sx = x;
+      sy = y;
+      started = true;
+    }
+    pts.push({ x, y });
+  }
+  return pts.length >= 2 ? pts : null;
+}
 function _splitPathSubpaths(d) {
   const subs = [];
   let current = "";
@@ -12097,6 +12282,14 @@ function sampleEllipsePoints(cx, cy, rx, ry, fitScale, toMM) {
 function samplePathSubpaths(el, ctx) {
   const out = [];
   for (const sub of _splitPathSubpaths(el.getAttribute("d") || "")) {
+    /* v98: si el subtrazo ya es polilínea, sus vértices SON la geometría. Remuestrearlo cada
+       0.5 mm no añadía ni un ápice de precisión —solo puntos alineados— y encima redondeaba
+       las esquinas que caían entre dos muestras. */
+    const straight = _polylineSubpathPts(sub);
+    if (straight) {
+      out.push(straight.map(p => ctx.toMM(p.x, p.y)));
+      continue;
+    }
     const probe = document.createElementNS("http://www.w3.org/2000/svg", "path");
     probe.setAttribute("d", sub);
     el.parentNode.appendChild(probe);
@@ -12275,7 +12468,10 @@ function pieceToPolylinesMM(piece, maxN) {
       num: attrNum,
       toMM: (px, py) => vb2mm(ctm.a * px + ctm.c * py + ctm.e, ctm.b * px + ctm.d * py + ctm.f)
     };
-    for (const pts of sampler(el, ctx)) {
+    for (const raw of sampler(el, ctx)) {
+      // v98: punto ÚNICO por el que pasa toda la geometría (export, lienzo, editor y
+      // estimado de fresado), así que decimar aquí los alinea a todos con lo que se corta.
+      const pts = decimatePts(raw, GEOM_TOL_MM);
       pts.capa = elCapa;
       pts.layer = elLayer;
       polylines.push(pts);
@@ -12305,7 +12501,9 @@ function extractSheetGeometry(sheet, capas, maxN) {
     }
     for (const cid in byCapa) {
       const c = capaById(capas, cid);
-      const polys = offsetClosedPolys(byCapa[cid], -Math.abs(c.offsetMM));
+      // v98: el offset de Clipper redondea las esquinas con un arco de muchos vértices —
+      // se decima igual que el resto para que el cajeado no engorde el DXF.
+      const polys = offsetClosedPolys(byCapa[cid], -Math.abs(c.offsetMM)).map(p => decimatePts(p, GEOM_TOL_MM));
       if (polys.length) offsets.push({
         capa: cid,
         polys
@@ -12347,12 +12545,19 @@ function buildSheetGeos(nest, capas) {
   }
   return geos;
 }
+/* v98: coordenada en mm con 1 µm de resolución y SIN ceros de relleno. toFixed(4) escribía
+   "123.4000" —una décima de micra, cincuenta veces más fina que lo que repite una fresadora—
+   y esos cuatro ceros se pagaban en cada vértice de cada contorno. */
+const _mmNum = v => {
+  const s = (Math.round(v * 1000) / 1000).toString();
+  return s === "-0" ? "0" : s;
+};
 function ptsToD(pts) {
   if (!pts.length) return "";
-  let d = "M" + pts[0].x.toFixed(3) + " " + pts[0].y.toFixed(3);
+  let d = "M" + _mmNum(pts[0].x) + " " + _mmNum(pts[0].y);
   const closed = isClosedPts(pts);
   const last = closed ? pts.length - 1 : pts.length;
-  for (let i = 1; i < last; i++) d += "L" + pts[i].x.toFixed(3) + " " + pts[i].y.toFixed(3);
+  for (let i = 1; i < last; i++) d += "L" + _mmNum(pts[i].x) + " " + _mmNum(pts[i].y);
   if (closed) d += "Z";
   return d;
 }
@@ -12439,8 +12644,8 @@ function buildDXF(sheet, plateW, plateH, sheetIndex, capas) {
     w(90, pp.length);
     w(70, closed ? 1 : 0);
     for (const p of pp) {
-      w(10, p.x.toFixed(4));
-      w(20, (plateH - p.y).toFixed(4));
+      w(10, _mmNum(p.x));
+      w(20, _mmNum(plateH - p.y));
     }
   };
   for (const g of geo) {
@@ -12459,11 +12664,11 @@ function buildDXF(sheet, plateW, plateH, sheetIndex, capas) {
       w(10, 0);
       w(20, 0);
       w(30, 0);
-      w(40, textH.toFixed(4));
+      w(40, _mmNum(textH));
       w(1, g.label);
       w(72, 1);
-      w(11, cxMM.toFixed(4));
-      w(21, (plateH - cyMM).toFixed(4));
+      w(11, _mmNum(cxMM));
+      w(21, _mmNum(plateH - cyMM));
       w(31, 0);
       w(73, 2);
     }
