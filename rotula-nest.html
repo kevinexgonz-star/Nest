@@ -42,6 +42,29 @@
      ║  de cortar; si con la unidad elegida el documento no cabe en ║
      ║  la placa se baja al multiplicador que si cabe, y se avisa.  ║
      ║  El ajuste manual del modal (userScale) sigue mandando.      ║
+     ║  v100: EL CAJETIN SEGUIA ENTRANDO POR LA RUTA SVG. El panel  ║
+     ║  de pedidos manda SVG convertido del .ai, y cada conversor   ║
+     ║  deja el nombre de capa en un sitio distinto: Illustrator en ║
+     ║  id (codificando lo no alfanumerico, "ESPEC 2" viaja como    ║
+     ║  "ESPEC_x20_2"), Inkscape en inkscape:label, Affinity en     ║
+     ║  serif:id, y varios en class o en un <title> dentro del      ║
+     ║  grupo. Se miraba solo id/inkscape:label/data-name sin       ║
+     ║  descodificar, asi que pasaban cajetines enteros. Ahora se   ║
+     ║  miran los nueve sitios y se descodifican los _xHH_.         ║
+     ║  Ademas, una capa que DECLARE corte ya no se descarta nunca: ║
+     ║  SVG_ANNOTATION_RE tumbaba todo lo que empezara por "espec"  ║
+     ║  y una capa "ESPECIAL CORTE" desaparecia sin avisar (fallo   ║
+     ║  latente, encontrado con el caso de control de la prueba).   ║
+     ║  Las marcas de impresion siguen mandando sobre esa excepcion ║
+     ║  ("CORTE IMPRESION" es el contorno del impreso, no pieza).   ║
+     ║  LIMITE, medido en los archivos de produccion: si el SVG NO  ║
+     ║  trae los nombres de capa, no hay nada que filtrar. En el    ║
+     ║  .ai de Sara la capa TIPO mide 451x1206 mm y ACABADO         ║
+     ║  451x1080 — mas grandes que piezas de corte reales de        ║
+     ║  268x242 — asi que por tamaño o forma NO se pueden           ║
+     ║  distinguir. En ese caso hay que mandar el .ai/.pdf original ║
+     ║  (fileType "pdf"), donde las capas OCG si viajan: BelenTorres║
+     ║  .ai da 11 piezas y Sara 8, con el cajetin fuera.            ║
      ║  v99: COLOR DE PEDIDO EN EL ARCHIVO, Y CAPA "ESPEC" FUERA.   ║
      ║  (1) El color por pedido solo existia en pantalla y en el    ║
      ║  PDF: el DXF/SVG metia todo el corte en la capa "CORTE", asi ║
@@ -10864,10 +10887,40 @@ const svgGroupNameOf = el => (el && el.getAttribute &&
 const svgShapeLayerOf = el => (el && el.getAttribute &&
   (el.getAttribute("data-layer") || el.getAttribute("data-name") ||
    el.getAttribute("inkscape:label") || el.getAttribute("serif:id")) || "").trim();
+/* v100: Illustrator codifica en el id todo lo que no sea alfanumérico — un espacio es
+   "_x20_", una "Ó" es "_xD3_" — así que "ESPEC 2" viaja como "ESPEC_x20_2" y el filtro no
+   lo reconocía. Se descodifica antes de comparar. */
+const _deEscSvgName = s => String(s == null ? "" : s).replace(/_x([0-9A-Fa-f]{2,6})_/g, (m, h) => {
+  try { return String.fromCodePoint(parseInt(h, 16)); } catch (e) { return " "; }
+});
 const svgLayerLooksAnnot = name => {
-  const n = String(name || "").replace(/_+\d*_*$/, "").replace(/[_-]+/g, " ").trim();
-  return !!n && (SVG_ANNOTATION_RE.test(n) || SVG_PRINT_MARK_RE.test(n) || isSpecLayerName(n));
+  const n = _deEscSvgName(name).replace(/_+\d*_*$/, "").replace(/[_-]+/g, " ").trim();
+  if (!n) return false;
+  // Impresión/marcas de registro mandan aunque el nombre diga CORTE: "CORTE IMPRESIÓN" es
+  // el contorno del impreso, no una pieza (demo-11).
+  if (SVG_PRINT_MARK_RE.test(n)) return true;
+  /* v100: si la capa DECLARA corte, no se descarta jamás. SVG_ANNOTATION_RE tumbaba todo
+     lo que empezara por "espec", y con ello una capa legítima llamada "ESPECIAL CORTE"
+     desaparecía sin avisar. Misma excepción que en isSpecLayerName. */
+  if (/CORTE|CAJEADO|HENDIDO|AGUJERO|TALADRO/.test(_normLayer(n))) return false;
+  return SVG_ANNOTATION_RE.test(n) || isSpecLayerName(n);
 };
+/* v100: TODOS los sitios donde un conversor puede dejar el nombre de capa. Cada conversor
+   usa el suyo (Illustrator id, Inkscape inkscape:label, Affinity serif:id, y varios
+   escriben class o un <title> dentro del grupo), y con uno solo se colaban cajetines
+   enteros. Esta lista se usa SOLO para decidir si se descarta; el nombre que viaja al DXF
+   exportado sigue saliendo de svgGroupNameOf, para no ensuciarlo con clases de estilo. */
+const svgAnnotHints = el => {
+  if (!el || !el.getAttribute) return [];
+  const out = ["id", "data-name", "data-layer", "data-layer-name", "inkscape:label", "serif:id",
+    "aria-label", "data-title", "class"].map(a => el.getAttribute(a)).filter(Boolean);
+  const kids = el.children || [];
+  for (const k of kids) {
+    if (k.tagName && k.tagName.toLowerCase() === "title") { out.push(k.textContent || ""); break; }
+  }
+  return out;
+};
+const svgNodeLooksAnnot = el => svgAnnotHints(el).some(svgLayerLooksAnnot);
 const SVG_SHAPE_TAGS = ["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"];
 const SVG_CONTAINER_TAGS = ["g", "svg", "symbol", "a"];
 const SVG_IGNORED_TAGS = ["defs", "clippath", "mask", "metadata", "title", "desc"];
@@ -10883,7 +10936,7 @@ function collectCuttableElements(root) {
       if (!tag || SVG_IGNORED_TAGS.includes(tag)) continue;
       if (SVG_CONTAINER_TAGS.includes(tag)) {
         const groupName = svgGroupNameOf(child);
-        if (svgLayerLooksAnnot(groupName)) {
+        if (svgNodeLooksAnnot(child)) {
           ignoredAnnotations++; // cajetín/anotación/impresión/marca/ESPEC → no es geometría de corte
           continue;
         }
@@ -10895,7 +10948,7 @@ function collectCuttableElements(root) {
          data-layer/data-name del <path>, y asi un cajetin ESPEC entraba como pieza. */
       if (SVG_SHAPE_TAGS.includes(tag)) {
         const own = svgShapeLayerOf(child);
-        if (svgLayerLooksAnnot(own) || svgLayerLooksAnnot(layer)) { ignoredAnnotations++; continue; }
+        if (svgNodeLooksAnnot(child) || svgLayerLooksAnnot(layer)) { ignoredAnnotations++; continue; }
         elements.push({ el: child, tag, transform, layer: own || layer });
       }
     }

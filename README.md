@@ -106,10 +106,19 @@ La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQ
   quién es cada pieza. El tipo de corte queda de prefijo para poder agrupar operaciones.
   Se desactiva con la casilla «Capa por pedido» del panel Exportar.
 - **Capas que no se cortan**: cajetines, cotas, marcas de registro y la capa **ESPEC** se
-  ignoran al importar, tanto en AI/PDF (por capa OCG) como en SVG (por `id`, `data-layer`
-  o `data-name`). Una capa que declare corte nunca se descarta por esto («ESPECIAL CORTE»
-  sigue siendo corte). Un PDF aplanado a una sola capa no lleva esa información, así que
-  ahí no hay nada que filtrar.
+  ignoran al importar, tanto en AI/PDF (por capa OCG) como en SVG. En SVG el nombre de capa
+  se busca en los nueve sitios donde lo dejan los distintos conversores (`id`,
+  `inkscape:label`, `data-name`, `data-layer`, `serif:id`, `class`, `aria-label`,
+  `data-title` y `<title>`), descodificando el escapado de Illustrator (`ESPEC_x20_2`).
+  Una capa que declare corte nunca se descarta por esto («ESPECIAL CORTE» sigue siendo
+  corte); las marcas de impresión sí, aunque lleven «CORTE» en el nombre.
+
+  > **Importante para integraciones**: si el SVG llega **sin nombres de capa** (muchos
+  > conversores AI→SVG los pierden), el filtro no tiene por dónde agarrar — y por tamaño o
+  > forma no se puede distinguir un cajetín de una pieza: en un archivo real la capa `TIPO`
+  > mide 451×1206 mm y hay piezas de corte de 268×242 mm. En ese caso, manda el **`.ai`/`.pdf`
+  > original** (`fileType: "pdf"` con el contenido en base64): las capas OCG sí viajan y el
+  > cajetín se descarta solo.
 - Resumen de material aprovechado (% y m²) por placa.
 - Exportación: DXF R12 y SVG plano por capas; PDF de vista previa a escala real.
 - Persistencia en localStorage.
