@@ -42,6 +42,39 @@
      ║  de cortar; si con la unidad elegida el documento no cabe en ║
      ║  la placa se baja al multiplicador que si cabe, y se avisa.  ║
      ║  El ajuste manual del modal (userScale) sigue mandando.      ║
+     ║  v98: EL "MOTOR DENSO" DABA EL RESULTADO MENOS DENSO. Con    ║
+     ║  letras de PDF bastan 45 piezas de 60-90 vertices para que   ║
+     ║  la compuerta de complejidad desvie el trabajo fuera del     ║
+     ║  NFP, o sea que salta en el trabajo NORMAL de esta app. El   ║
+     ║  relevo era _skylinePack, que empaqueta por CAJA ENVOLVENTE: ║
+     ║  ni mete nada en el hueco de una "O" ni entrelaza siluetas.  ║
+     ║  Por eso marcar "Motor denso" daba ~38% y desmarcarlo (motor ║
+     ║  Grid, mascara real) ~75% en el mismo lote. Ahora el relevo  ║
+     ║  empaqueta con LOS DOS y se queda con el que menos placa     ║
+     ║  gaste: los dos son deterministas y ninguno puede solapar,   ║
+     ║  asi que no hay que adivinar cual le va a la geometria. Por  ║
+     ║  encima de GRID_FALLBACK_MAX piezas sigue mandando el        ║
+     ║  skyline, que es el barato de montar. Medido en Chromium     ║
+     ║  (45 piezas, 6 pedidos, placa 2000x3000): lote de letras     ║
+     ║  densas y concavas 59.8% -> 75.4% con las MISMAS 3 placas;   ║
+     ║  lote de letras redondas 73.9% -> 73.9% (gana estantes y se  ║
+     ║  usa estantes: la comparacion tambien protege de empeorar).  ║
+     ║  Ademas dos arreglos en el motor Grid, que pasa a ser ruta   ║
+     ║  densa de primera: (1) ya RESPETA LA SEPARACION — no         ║
+     ║  dilataba nada y se fiaba de la cuantizacion a celdas de     ║
+     ║  50 mm, con dos piezas en celdas contiguas el arte podia     ║
+     ║  quedar a tocar y sin sitio para la fresa; ahora la mascara  ║
+     ║  engorda gap/2 por pieza (redondeo al alza: pasarse es       ║
+     ║  gratis, quedarse corto no). (2) AGRUPA de verdad: ordenar   ║
+     ║  la lista por pedido no bastaba porque findBestPlacement     ║
+     ║  busca el mejor hueco de TODA la placa y las piezas del      ║
+     ║  pedido 2 se iban a rellenar los huecos del pedido 1         ║
+     ║  (dispersion 4.72, peor que sin agrupar). La distancia a la  ║
+     ║  zona del propio pedido entra en el score ACOTADA por debajo ║
+     ║  de una fila de rejilla: desempata entre posiciones igual de ║
+     ║  densas —donde antes mandaba "la mas a la izquierda"— y      ║
+     ║  nunca escoge una colocacion peor. Medido: dispersion        ║
+     ║  7.65 -> 3.71 y 1.95 -> 1.30 segun el lote, mismas placas.   ║
      ║  v97: AGRUPAR POR PEDIDO SIN PARTIR LA PLACA (casilla         ║
      ║  "Agrupar por pedido", ON). El color ya distinguia cada      ║
      ║  pedido, pero sus piezas salian desperdigadas por toda la    ║
@@ -10949,17 +10982,32 @@ function parseSVG(svgText, userScale) {
    skyline/shelf, gate de complejidad y motor NFP (nestPiecesNFP / agrupado).
    ═══════════════════════════════════════════════════════════════════════════ */
 const GRID_CELL = 50;
+/* v98: tope de piezas para relevar al motor Grid cuando la compuerta desvía un trabajo del
+   NFP. Por debajo compensa (densidad muy superior al empaquetado por cajas); por encima,
+   rasterizar una máscara por pieza y barrer la rejilla en cada colocación se dispara y
+   manda el skyline. 300 cubre los lotes normales (los de ~800 piezas son la excepción). */
+const GRID_FALLBACK_MAX = 300;
 const FINE_RES = 5;
 const SNAP = GRID_CELL / FINE_RES;
-async function svgToMask(piece, fineRes) {
+async function svgToMask(piece, fineRes, gapMM) {
   const pw = Math.max(2, Math.ceil(piece.w / fineRes));
   const ph = Math.max(2, Math.ceil(piece.h / fineRes));
-  const padding = 2;
+  /* v98: la separación configurada se aplica DILATANDO la máscara fina (1 px = fineRes mm).
+     Hasta v97 el motor Grid ignoraba el gap y se fiaba de la cuantización a celdas de 50 mm:
+     con dos piezas en celdas contiguas el arte podía quedar a tocar, sin sitio para la fresa.
+     Ahora el borde crece gap/2 por pieza, así entre dos piezas queda el gap entero. Se hace
+     sobre el bitmap, antes de resumir a celdas, que es donde cuesta cero. */
+  /* Se redondea HACIA ARRIBA al píxel del ráster (5 mm): la separación real puede quedar
+     algo por encima de la pedida, nunca por debajo — con la fresa, pasarse es gratis y
+     quedarse corto se come la pieza de al lado. Si el margen sale caro en densidad, el
+     empaquetado por estantes gana la comparación y se usa ese: nadie paga el margen dos veces. */
+  const gpx = (+gapMM > 0) ? Math.ceil(+gapMM / 2 / fineRes) : 0;
+  const padding = 2 + gpx;
   const cw = pw + padding * 2;
   const ch = ph + padding * 2;
   const content = piece.svgRaw || piece.svgContent;
   if (!content || !piece.viewBox) {
-    return rectMask(pw, ph, piece.w, piece.h);
+    return rectMask(pw + gpx * 2, ph + gpx * 2, piece.w, piece.h); // v98: el rectángulo también reserva el gap
   }
   try {
     let cleaned = content.replace(/fill\s*=\s*"none"/gi, 'fill="black"');
@@ -10981,10 +11029,21 @@ async function svgToMask(piece, fineRes) {
     cx.fillRect(0, 0, cw, ch);
     cx.drawImage(img, padding, padding, pw, ph);
     const pix = cx.getImageData(0, 0, cw, ch).data;
-    const isDark = new Uint8Array(cw * ch);
+    let isDark = new Uint8Array(cw * ch);
     for (let i = 0; i < cw * ch; i++) {
       const p4 = i * 4;
       if (pix[p4] < 200 || pix[p4 + 1] < 200 || pix[p4 + 2] < 200) isDark[i] = 1;
+    }
+    /* v98: engorda el arte gpx píxeles (= gap/2) para que la separación configurada exista
+       también en este motor. Dilatación por vecindad 4, una pasada por píxel de margen. */
+    for (let it = 0; it < gpx; it++) {
+      const grown = new Uint8Array(isDark);
+      for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+        if (isDark[y * cw + x]) continue;
+        if ((x > 0 && isDark[y * cw + x - 1]) || (x + 1 < cw && isDark[y * cw + x + 1]) ||
+            (y > 0 && isDark[(y - 1) * cw + x]) || (y + 1 < ch && isDark[(y + 1) * cw + x])) grown[y * cw + x] = 1;
+      }
+      isDark = grown;
     }
     const exterior = new Uint8Array(cw * ch);
     const stack = [];
@@ -11012,8 +11071,12 @@ async function svgToMask(piece, fineRes) {
       tryPush(x, y + 1);
       tryPush(x, y - 1);
     }
-    const gw = Math.ceil(pw / SNAP);
-    const gh = Math.ceil(ph / SNAP);
+    /* v98: la rejilla cubre el arte MÁS su margen de separación (gpx a cada lado); si se
+       resumiera solo el área original, la dilatación quedaría recortada y el gap no se
+       reservaría. El arte sigue dibujándose centrado en el hueco (drawW/drawH). */
+    const ew = pw + gpx * 2, eh = ph + gpx * 2;
+    const gw = Math.ceil(ew / SNAP);
+    const gh = Math.ceil(eh / SNAP);
     const coarseMask = new Uint8Array(gw * gh);
     let filled = 0;
     const DARK_THRESHOLD = 0.05;
@@ -11025,8 +11088,8 @@ async function svgToMask(piece, fineRes) {
           for (let sx = 0; sx < SNAP; sx++) {
             const px = gx * SNAP + sx;
             const py = gy * SNAP + sy;
-            if (px >= pw || py >= ph) continue;
-            const idx = (py + padding) * cw + (px + padding);
+            if (px >= ew || py >= eh) continue;
+            const idx = (py + padding - gpx) * cw + (px + padding - gpx);
             totalPx++;
             if (isDark[idx]) darkCount++;
           }
@@ -11038,7 +11101,7 @@ async function svgToMask(piece, fineRes) {
       }
     }
     if (filled < Math.max(1, gw * gh * 0.05)) {
-      return rectMask(pw, ph, piece.w, piece.h);
+      return rectMask(pw + gpx * 2, ph + gpx * 2, piece.w, piece.h); // v98: el rectángulo también reserva el gap
     }
     return {
       mask: coarseMask,
@@ -11050,7 +11113,7 @@ async function svgToMask(piece, fineRes) {
       origH: piece.h
     };
   } catch (e) {
-    return rectMask(pw, ph, piece.w, piece.h);
+    return rectMask(pw + gpx * 2, ph + gpx * 2, piece.w, piece.h); // v98: el rectángulo también reserva el gap
   }
 }
 function rectMask(pw, ph, origW, origH) {
@@ -11097,12 +11160,13 @@ function expandPiecesToInstances(pieces) {
      (mayor a menor). findBestPlacement puntúa por altura añadida y luego por x, así que
      colocar seguidas las piezas de un pedido las deja en la misma zona de la placa. */
   const rank = __NEST_CFG__.groupByRef ? orderRankMap(pieces) : null;
-  instances.sort((a, b) => (rank ? orderRankOf(a, rank) - orderRankOf(b, rank) : 0) || b.w * b.h - a.w * a.h || b.h - a.h);
+  if (rank) for (const it of instances) it.__ord = orderRankOf(it, rank); // v98: lo usa la cohesión
+  instances.sort((a, b) => (rank ? a.__ord - b.__ord : 0) || b.w * b.h - a.w * a.h || b.h - a.h);
   return instances;
 }
 const MASK_BATCH = 8; // piezas rasterizadas por tanda: no bloquear el hilo con lotes grandes
 /* Máscara de cada pieza distinta en sus cuatro giros (0/90/180/270). */
-async function buildRotationMasks(instances, onProgress) {
+async function buildRotationMasks(instances, onProgress, gapMM) {
   const masksById = {};
   const uniquePieces = [];
   const seenIds = new Set();
@@ -11114,7 +11178,7 @@ async function buildRotationMasks(instances, onProgress) {
   let done = 0;
   for (let i = 0; i < uniquePieces.length; i += MASK_BATCH) {
     const batch = uniquePieces.slice(i, i + MASK_BATCH);
-    const raws = await Promise.all(batch.map(p => svgToMask(p, FINE_RES)));
+    const raws = await Promise.all(batch.map(p => svgToMask(p, FINE_RES, gapMM)));
     batch.forEach((p, k) => {
       const raw = raws[k];
       masksById[p.id] = [raw, rot90(raw), rot90(rot90(raw)), rot90(rot90(rot90(raw)))];
@@ -11171,13 +11235,25 @@ function maskBottomRow(m, sy) {
   }
   return sy;
 }
+/* v98: peso del término de COHESIÓN por pedido, y su tope. Ordenar la lista por pedido no
+   basta en este motor: findBestPlacement busca el mejor hueco de TODA la placa, así que las
+   piezas del pedido 2 se van a rellenar los huecos que dejó el pedido 1 y el agrupado se
+   deshace (medido: dispersión 4.72 agrupando por orden de lista, peor que sin agrupar).
+   Aquí la distancia a la zona que ya ocupa el pedido entra en el score, pero ACOTADA por
+   debajo de una fila de rejilla (1e6): decide entre posiciones que añaden la MISMA altura
+   —donde antes mandaba "la más a la izquierda"— y nunca puede escoger una colocación menos
+   densa. Densidad primero, agrupado después. */
+const GRID_COHESION_W = 2e4;
+const GRID_COHESION_MAX = 45; // celdas; 45·2e4 = 9e5 < 1e6 (una fila)
 /* Mejor hueco para una pieza: primero la placa más temprana, luego la posición que menos
-   altura añade, luego la más a la izquierda, y a igualdad la que más contacto tiene.
-   Los pesos del score codifican ese orden de prioridades. */
-function findBestPlacement(sheets, masks, firstSheet, gW, gH) {
+   altura añade, luego la más cercana a las piezas ya colocadas de su MISMO PEDIDO, luego la
+   más a la izquierda, y a igualdad la que más contacto tiene. Los pesos del score codifican
+   ese orden de prioridades. ordBoxes[si][ord] = caja que ocupa ya ese pedido en esa placa. */
+function findBestPlacement(sheets, masks, firstSheet, gW, gH, ordBoxes, ord) {
   let best = null;
   for (let si = firstSheet; si < sheets.length; si++) {
     const grid = sheets[si].grid;
+    const box = ordBoxes && ord != null ? (ordBoxes[si] || {})[ord] : null;
     for (let ri = 0; ri < masks.length; ri++) {
       const m = masks[ri];
       if (m.w > gW || m.h > gH) continue;
@@ -11190,7 +11266,13 @@ function findBestPlacement(sheets, masks, firstSheet, gW, gH) {
           if (firstFitY === Infinity) firstFitY = y;
           const addedHeight = maskBottomRow(m, y);
           const contacts = countMaskContacts(grid, gW, gH, m, x, y);
-          const score = si * 1e12 + addedHeight * 1000000 + x * 100 - contacts * 10;
+          let coh = 0;
+          if (box) {
+            const dx = Math.max(0, box.x0 - (x + m.w), x - box.x1);
+            const dy = Math.max(0, box.y0 - (y + m.h), y - box.y1);
+            coh = Math.min(dx + dy, GRID_COHESION_MAX) * GRID_COHESION_W;
+          }
+          const score = si * 1e12 + addedHeight * 1000000 + coh + x * 100 - contacts * 10;
           if (!best || score < best.score) best = { si, ri, x, y, m, score };
         }
       }
@@ -11205,8 +11287,9 @@ async function nestPieces(pieces, W, H, gap, onProgress) {
   if (!all.length) return [{
     pieces: []
   }];
-  const mc = await buildRotationMasks(all, onProgress);
+  const mc = await buildRotationMasks(all, onProgress, gap);
   const sheets = [];
+  const ordBoxes = []; // v98: por placa, la caja que ocupa cada pedido (cohesión)
   const mkSheet = () => ({
     pieces: [],
     grid: new Uint8Array(gW * gH)
@@ -11219,7 +11302,7 @@ async function nestPieces(pieces, W, H, gap, onProgress) {
     const masks = mc[p.id];
     const minSi = Number.isInteger(p.forceSheet) && p.forceSheet >= 0 ? p.forceSheet : 0;
     while (sheets.length <= minSi) sheets.push(mkSheet());
-    let best = findBestPlacement(sheets, masks, minSi, gW, gH);
+    let best = findBestPlacement(sheets, masks, minSi, gW, gH, ordBoxes, p.__ord);
     if (!best) {
       let m = null,
         ri = 0;
@@ -11268,6 +11351,13 @@ async function nestPieces(pieces, W, H, gap, onProgress) {
       __cx: clampedX,
       __cy: clampedY
     });
+    if (p.__ord != null) { // v98: amplía la caja del pedido en esta placa (cohesión)
+      const bx = ordBoxes[best.si] = ordBoxes[best.si] || {};
+      const e = bx[p.__ord], x1 = clampedX + best.m.w, y1 = clampedY + best.m.h;
+      bx[p.__ord] = e
+        ? { x0: Math.min(e.x0, clampedX), y0: Math.min(e.y0, clampedY), x1: Math.max(e.x1, x1), y1: Math.max(e.y1, y1) }
+        : { x0: clampedX, y0: clampedY, x1, y1 };
+    }
   }
   const errors = auditPlacedSheets(sheets, gW, gH);
   if (errors.length) {
@@ -11766,11 +11856,51 @@ async function nestPiecesNFP(pieces, W, H, gap, onProgress) {
     const _gate = nfpComplexityGate(parts, totalPieces);
     let result;
     if (_gate.overCap) {
+      /* ── v98: al desviar por complejidad, el relevo es el MOTOR GRID, no el empaquetado
+         por cajas ────────────────────────────────────────────────────────────────────
+         La compuerta salta en cuanto hay letras de PDF (45 piezas de 60-90 vértices ya la
+         disparan), o sea en el trabajo normal de esta app, no en un caso raro. Hasta aquí
+         el relevo era _skylinePack, que empaqueta por CAJA ENVOLVENTE: no mete nada en el
+         hueco de una "O" ni entrelaza siluetas, y por eso el mismo lote rendía ~38% con el
+         motor denso marcado y ~75% con él apagado (el Grid). Absurdo: marcar "motor denso"
+         daba el resultado MENOS denso. El Grid rasteriza la silueta real (los huecos quedan
+         libres), no puede solapar por construcción —estampa celdas ocupadas— y es la ruta
+         que la app ya usa cuando el NFP está apagado. Se limita por número de piezas: por
+         encima del tope, montar y barrer máscaras cuesta más que la densidad que gana, y
+         ahí sigue mandando el skyline de siempre. */
       try { console.warn('[Rotula] nesting de ' + totalPieces + ' pieza(s) (contorno medio ' +
         _gate.avgVerts.toFixed(0) + 'v, máx ' + _gate.maxVerts + 'v) supera el umbral seguro del motor NFP (' +
-        _gate.cap + ') → empaquetado determinista por estantes (sin NFP, sin solape, menos denso)'); } catch (e) {}
-      if (onProgress) onProgress('place', 100, 100);
+        _gate.cap + ') → ' + (totalPieces <= GRID_FALLBACK_MAX ? 'motor Grid (máscara real, aprovecha huecos)' :
+        'empaquetado determinista por estantes (sin NFP, sin solape, menos denso)')); } catch (e) {}
+      /* Cuál de los dos rinde más depende de la GEOMETRÍA, no del tamaño del lote: con
+         letras huecas y siluetas irregulares gana el Grid de calle; con piezas convexas
+         pequeñas gana el skyline, porque el Grid las cuantiza a celdas de 50 mm. Medido en
+         navegador con dos lotes reales: 38% vs 75% a favor del Grid en uno, 59% vs 52% a
+         favor del skyline en el otro. Como los dos son deterministas, baratos e incapaces
+         de solapar, no se adivina: se empaquetan los dos y gana el que menos placa gaste. */
       const _shelf = _skylinePack(parts, W, H, gap || 0);
+      let _grid = null;
+      if (totalPieces <= GRID_FALLBACK_MAX && !(typeof window !== 'undefined' && window.__NEST_CANCEL__ === true)) {
+        try { _grid = await nestPieces(pieces, W, H, gap, onProgress); }
+        catch (e) { try { console.warn('[Rotula] el motor Grid falló tras la compuerta → estantes:', e && e.message); } catch (e2) {} }
+      }
+      if (onProgress) onProgress('place', 100, 100);
+      const _spanOf = (shs, get) => (shs || []).reduce((s, sh) => {
+        let mx = 0, my = 0;
+        for (const p of get(sh)) { const b = p.x + (p.w != null ? p.w : p.placedW || 0), t = p.y + (p.h != null ? p.h : p.placedH || 0);
+          if (b > mx) mx = b; if (t > my) my = t; }
+        return s + mx * my;
+      }, 0);
+      const _skySpan = _spanOf(_shelf, sh => sh), _gridSpan = _grid ? _spanOf(_grid, sh => sh.pieces || []) : Infinity;
+      const _gridWins = _grid && _grid.length &&
+        (_grid.length < _shelf.length || (_grid.length === _shelf.length && _gridSpan < _skySpan));
+      if (_grid) try { console.warn('[Rotula] relevo de la compuerta — Grid: ' + _grid.length + ' placa(s), ' +
+        Math.round(_gridSpan / 1e6) + ' m² ocupados · estantes: ' + _shelf.length + ' placa(s), ' +
+        Math.round(_skySpan / 1e6) + ' m² → gana ' + (_gridWins ? 'el Grid' : 'estantes')); } catch (e) {}
+      if (_gridWins) {
+        _grid._engine = true; _grid._gatedToGrid = true;
+        return _grid;
+      }
       result = { sheets: _shelf, placedCount: _shelf.reduce((s, sh) => s + sh.length, 0), totalCount: totalPieces, _gatedToShelf: true };
     } else {
       const timeBudget = totalPieces > 40 ? 1800 : 1200;

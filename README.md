@@ -93,6 +93,14 @@ La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQ
   (80,7 %), mismos milisegundos, y cada pedido pasa de repartirse en 3,95 placas a 1,05.
   Si agrupar hiciera falta **más de una placa**, se repite sin agrupar y gana el que menos
   placa gaste.
+- **Relevo denso cuando el NFP no puede**: con letras de PDF (contornos de 60-90 vértices)
+  la compuerta de complejidad desvía el trabajo fuera del motor NFP. Ese relevo empaqueta
+  ahora con los **dos** métodos deterministas —estantes (caja envolvente) y motor Grid
+  (máscara real, que aprovecha el hueco de una «O»)— y se queda con el que menos placa
+  gaste. Medido en navegador con 45 piezas: lote de letras cóncavas 59,8 % → 75,4 % de
+  aprovechamiento con las mismas placas; lote donde ya ganaba estantes, idéntico.
+  El motor Grid respeta además la separación configurada (antes solo se fiaba de su
+  rejilla de 50 mm y dos piezas podían quedar a tocar).
 - Resumen de material aprovechado (% y m²) por placa.
 - Exportación: DXF R12 y SVG plano por capas; PDF de vista previa a escala real.
 - Persistencia en localStorage.
