@@ -85,6 +85,14 @@ La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQ
   encima de cada pieza — con lotes grandes rotular pieza a pieza tapaba la placa de letras.
   El lienzo y el PDF de vista previa pintan exactamente lo mismo. El rótulo sobre cada pieza
   sigue disponible en la casilla «Ref.» (apagada por defecto).
+- **Agrupado por pedido** (casilla «Agrupar por pedido», activada): las piezas de una misma
+  referencia se anidan juntas, para recogerlas de la placa pedido a pedido sin clasificarlas.
+  No trocea la placa en bandas: solo cambia el orden de entrada de las piezas en los tres
+  empaquetadores (NFP, Grid y los deterministas), así que no añade ni una pasada del motor.
+  Medido sobre el propio motor: 840 piezas / 40 pedidos → mismas placas, misma ocupación
+  (80,7 %), mismos milisegundos, y cada pedido pasa de repartirse en 3,95 placas a 1,05.
+  Si agrupar hiciera falta **más de una placa**, se repite sin agrupar y gana el que menos
+  placa gaste.
 - Resumen de material aprovechado (% y m²) por placa.
 - Exportación: DXF R12 y SVG plano por capas; PDF de vista previa a escala real.
 - Persistencia en localStorage.

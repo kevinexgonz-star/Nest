@@ -42,6 +42,24 @@
      ║  de cortar; si con la unidad elegida el documento no cabe en ║
      ║  la placa se baja al multiplicador que si cabe, y se avisa.  ║
      ║  El ajuste manual del modal (userScale) sigue mandando.      ║
+     ║  v97: AGRUPAR POR PEDIDO SIN PARTIR LA PLACA (casilla         ║
+     ║  "Agrupar por pedido", ON). El color ya distinguia cada      ║
+     ║  pedido, pero sus piezas salian desperdigadas por toda la    ║
+     ║  placa. Las bandas de v82 lo arreglaban troceando el trabajo ║
+     ║  y eso costaba placas (banco: ocupacion 63% -> 4%). Aqui NO  ║
+     ║  se trocea nada: solo cambia el ORDEN DE ENTRADA de las      ║
+     ║  piezas en los tres empaquetadores (NFP, Grid, skyline/      ║
+     ║  shelf). Como todos llenan por abajo-izquierda en ese orden, ║
+     ║  las piezas de un pedido caen contiguas sin una sola llamada ║
+     ║  extra al motor ni geometria nueva. El rango de pedido sale  ║
+     ║  de la MISMA lista ordenada que reparte los colores, asi el  ║
+     ║  primer color es el primer bloque de la placa. Medido (banco ║
+     ║  Node sobre este mismo motor): skyline 840 pzs/40 pedidos -> ║
+     ║  mismas 6 placas, misma ocupacion 80.7%, mismos ms, placas   ║
+     ║  por pedido 3.95 -> 1.05; NFP 48 pzs -> tiempo x0.99.        ║
+     ║  Guarda: si el agrupado saca MAS DE UNA placa se repite sin  ║
+     ║  agrupar y gana el que menos placas gaste (con una sola      ║
+     ║  placa el reparto mas alto no gasta material, se acepta).    ║
      ║  v96: IDENTIFICAR POR COLOR, REFERENCIAS DEBAJO. Rotular la  ║
      ║  referencia ENCIMA de cada pieza solo se aguanta con pocas   ║
      ║  piezas: en un lote grande la placa se convertia en una      ║
@@ -8470,7 +8488,7 @@ return ret;
       const sk = shapeKeyOf(contour);
       const shapeId = (canonId[sk]!==undefined) ? canonId[sk] : (canonId[sk] = 'S'+(canonN++));
       const rotsAllowed = symRots(raw, part.rotations||defRots);
-      for (let i=0;i<q;i++) instances.push({ shapeId, srcId:part.id, contour, rotsAllowed, area, maxDim, idx:instances.length });
+      for (let i=0;i<q;i++) instances.push({ shapeId, srcId:part.id, contour, rotsAllowed, area, maxDim, idx:instances.length, ord:(part.ord|0) });
     }
     const totalCount=instances.length;
     if (!totalCount) return { sheets:[], placedCount:0, totalCount:0 };
@@ -8487,7 +8505,13 @@ return ret;
     const TH = (config.bigThreshold != null ? config.bigThreshold : 500);
     const groupBig = config.groupBig !== false;
     for (const inst of instances) inst.big = groupBig && inst.maxDim > TH;
-    const base = instances.slice().sort((a,b)=> ((b.big?1:0)-(a.big?1:0)) || (b.area-a.area));
+    /* v97: agrupado por PEDIDO (config.groupByOrder). Las instancias entran ordenadas por
+       pedido y, dentro de cada pedido, por el criterio de siempre (grandes primero, área
+       desc). Como el coste BLF llena por abajo-izquierda en el orden de entrada, las piezas
+       de un mismo pedido caen contiguas SIN partir el trabajo ni añadir llamadas al motor:
+       mismo número de pasadas, misma caché de NFP, mismo coste. */
+    const groupByOrder = !!config.groupByOrder;
+    const base = instances.slice().sort((a,b)=> (groupByOrder ? (a.ord-b.ord) : 0) || ((b.big?1:0)-(a.big?1:0)) || (b.area-a.area));
     const nBig = base.reduce((s,x)=>s+(x.big?1:0),0);
     const t0 = Date.now();
 
@@ -8520,7 +8544,14 @@ return ret;
       iter++;
       const cand=order.slice(), n=cand.length;
       // i,j en el MISMO bloque (grandes [0,nBig) o pequeñas [nBig,n)) para no romper la agrupación
-      const i=Math.floor(rand()*n); const lo=(i<nBig?0:nBig), hi=(i<nBig?nBig:n);
+      const i=Math.floor(rand()*n); let lo=(i<nBig?0:nBig), hi=(i<nBig?nBig:n);
+      /* v97: con agrupado por pedido el bloque permutable es el TRAMO DEL MISMO PEDIDO. Sin
+         esta acotación la búsqueda local reordenaría entre pedidos (deshaciendo el agrupado)
+         o, si se bloquea entera, repetiría pasadas idénticas quemando el presupuesto. */
+      if (groupByOrder) { lo=i; hi=i;
+        while (lo>0 && cand[lo-1].ord===cand[i].ord) lo--;
+        while (hi+1<n && cand[hi+1].ord===cand[i].ord) hi++;
+        hi++; }
       if (hi-lo > 1) { const j=lo+Math.floor(rand()*(hi-lo));
         if(i!==j){const t=cand[i];cand[i]=cand[j];cand[j]=t;} }
       const r=await packAll(cand,binW,binH,ctx,COSTS[bestCostKey],optProg,deadline); const f=fitness(r);
@@ -8848,7 +8879,14 @@ const GAP = 5;
 const __NEST_CFG__ = {
   nfp: true,
   gap: GAP,
-  groupOrders: false // demo-6: opcion retirada; los pedidos se distinguen por color (v80), no por bandas
+  groupOrders: false, // demo-6: opcion retirada; los pedidos se distinguen por color (v80), no por bandas
+  /* v97: AGRUPADO BLANDO por pedido. No trocea el trabajo (eso son las bandas de groupOrders,
+     que cuestan aprovechamiento): solo cambia el ORDEN DE ENTRADA de las piezas en los tres
+     empaquetadores (NFP, Grid y los deterministas skyline/shelf). Como todos llenan por
+     abajo-izquierda siguiendo ese orden, las piezas de un pedido caen contiguas sin añadir
+     ni una llamada al motor. Medido (banco Node, ver commit): skyline 840 pzs/40 pedidos →
+     mismas 6 placas, misma ocupación 80.7%, mismos ms, placas por pedido 3.95 → 1.05. */
+  groupByRef: true
 };
 if (typeof window !== 'undefined') window.__NEST_CFG__ = __NEST_CFG__;
 /* demo-12: sistema de RETALES oculto "por ahora". Un solo interruptor lo apaga por completo:
@@ -8940,7 +8978,10 @@ const _hslHex = (h, s, l) => {
   return "#" + t.map(v => Math.round((v + m) * 255).toString(16).padStart(2, "0")).join("");
 };
 const extraOrderColor = k => _hslHex(k * 137.508 + 47, k % 2 ? 76 : 60, 30 + k % 3 * 8);
-function orderColorMap(pieces) {
+/* v97: lista ORDENADA de referencias del lote. Es la fuente única del reparto de colores
+   y del orden de anidado, así el pedido que va primero en la placa es el primero de la
+   leyenda y lleva el primer color de la paleta (color y posición cuentan lo mismo). */
+function orderRefList(pieces) {
   const refs = [];
   (pieces || []).forEach(p => {
     const r = refOf(p);
@@ -8949,10 +8990,25 @@ function orderColorMap(pieces) {
   // Orden estable: el mismo conjunto de pedidos da siempre los mismos colores, así el
   // lienzo y el PDF exportado coinciden pieza a pieza.
   refs.sort((a, b) => a.localeCompare(b, "es", { numeric: true, sensitivity: "base" }));
+  return refs;
+}
+function orderColorMap(pieces) {
   const m = new Map();
-  refs.forEach((r, i) => m.set(r, i < SRC_PALETTE.length ? SRC_PALETTE[i] : extraOrderColor(i - SRC_PALETTE.length)));
+  orderRefList(pieces).forEach((r, i) => m.set(r, i < SRC_PALETTE.length ? SRC_PALETTE[i] : extraOrderColor(i - SRC_PALETTE.length)));
   return m;
 }
+/* Rango de anidado por pedido: mismo orden que los colores. Las piezas sin referencia
+   (importadas a mano) van al final, juntas y en posición estable. */
+function orderRankMap(pieces) {
+  const m = new Map();
+  orderRefList(pieces).forEach((r, i) => m.set(r, i));
+  return m;
+}
+const orderRankOf = (p, map) => {
+  const r = refOf(p);
+  const v = map && r ? map.get(r) : undefined;
+  return v === undefined ? 1e6 : v;
+};
 const orderColorOf = (p, map) => {
   const r = refOf(p);
   return (map && map.get(r)) || srcColorFor(r) || srcColorFor(p && p.fileName);
@@ -11037,7 +11093,11 @@ function expandPiecesToInstances(pieces) {
   pieces.forEach(p => {
     for (let q = 0; q < p.quantity; q++) instances.push({ ...p, iid: p.id + '-q' + q });
   });
-  instances.sort((a, b) => b.w * b.h - a.w * a.h || b.h - a.h);
+  /* v97: con groupByRef, primero por PEDIDO y dentro del pedido el criterio de siempre
+     (mayor a menor). findBestPlacement puntúa por altura añadida y luego por x, así que
+     colocar seguidas las piezas de un pedido las deja en la misma zona de la placa. */
+  const rank = __NEST_CFG__.groupByRef ? orderRankMap(pieces) : null;
+  instances.sort((a, b) => (rank ? orderRankOf(a, rank) - orderRankOf(b, rank) : 0) || b.w * b.h - a.w * a.h || b.h - a.h);
   return instances;
 }
 const MASK_BATCH = 8; // piezas rasterizadas por tanda: no bloquear el hilo con lotes grandes
@@ -11446,10 +11506,14 @@ function flattenPartsToRects(parts) {
     for (const q of (p.polygon || [])) { if (q.x < mnx) mnx = q.x; if (q.y < mny) mny = q.y; if (q.x > mxx) mxx = q.x; if (q.y > mxy) mxy = q.y; }
     const w0 = Math.max(0.1, mxx - mnx), h0 = Math.max(0.1, mxy - mny);
     const copies = Math.max(1, p.quantity || 1);
-    for (let k = 0; k < copies; k++) rects.push({ id: p.id, w0, h0 });
+    for (let k = 0; k < copies; k++) rects.push({ id: p.id, w0, h0, ord: p.ord | 0 });
   }
   return rects;
 }
+/* v97: clave de orden de los empaquetadores deterministas. Con groupByRef el pedido manda
+   y el criterio de siempre (altura/ancho desc) decide DENTRO del pedido. Sin él, idéntico
+   a lo anterior. Nunca cambia dónde cabe una pieza: solo en qué orden se preguntan. */
+const _packOrd = (a, b) => (__NEST_CFG__.groupByRef ? (a.ord - b.ord) : 0);
 /* Rectángulo colocado, en el formato que espera el resto de la app. */
 function placedRect(id, x, y, w, h, rotation) {
   return {
@@ -11460,7 +11524,7 @@ function placedRect(id, x, y, w, h, rotation) {
 function _skylinePack(parts, binW, binH, gap) {
   const g = gap || 0;
   const flat = flattenPartsToRects(parts);
-  flat.sort((a, b) => (b.h0 - a.h0) || (b.w0 - a.w0)); // altura desc, luego ancho desc (determinista)
+  flat.sort((a, b) => _packOrd(a, b) || (b.h0 - a.h0) || (b.w0 - a.w0)); // pedido, altura desc, ancho desc (determinista)
   const sheets = [];
   let sky = [{ x: 0, y: 0, w: binW }];
   let cur = [];
@@ -11512,7 +11576,7 @@ function _skylinePack(parts, binW, binH, gap) {
 function _shelfPack(parts, binW, binH, gap) {
   const g = gap || 0;
   const flat = flattenPartsToRects(parts);
-  flat.sort((a, b) => b.h0 - a.h0); // más altas primero → filas más limpias
+  flat.sort((a, b) => _packOrd(a, b) || (b.h0 - a.h0)); // pedido, luego más altas primero → filas más limpias
   const sheets = [];
   let cur = [], x = 0, y = 0, rowH = 0;
   const pushSheet = () => { if (cur.length) sheets.push(cur); cur = []; x = 0; y = 0; rowH = 0; };
@@ -11616,6 +11680,9 @@ async function nestPiecesNFP(pieces, W, H, gap, onProgress) {
   try {
     const parts = [],
       pieceByType = {};
+    // v97: rango de pedido por pieza (mismo orden que los colores). Viaja con cada part y
+    // lo usan tanto el motor NFP como los empaquetadores deterministas.
+    const _rank = __NEST_CFG__.groupByRef ? orderRankMap(pieces) : null;
     for (let i = 0; i < pieces.length; i++) {
       if (onProgress) onProgress('masks', i, pieces.length);
       let contour = window.pieceOutlineMM && pieces[i] && pieces[i].svgRaw ? window.pieceOutlineMM(pieces[i]) : null;
@@ -11678,6 +11745,7 @@ async function nestPiecesNFP(pieces, W, H, gap, onProgress) {
       pieceByType[i] = pieces[i];
       parts.push({
         id: i,
+        ord: _rank ? orderRankOf(pieces[i], _rank) : 0,
         polygon: contour,
         quantity: pieces[i].quantity || 1,
         rotations: [0, 90, 180, 270]
@@ -11706,10 +11774,7 @@ async function nestPiecesNFP(pieces, W, H, gap, onProgress) {
       result = { sheets: _shelf, placedCount: _shelf.reduce((s, sh) => s + sh.length, 0), totalCount: totalPieces, _gatedToShelf: true };
     } else {
       const timeBudget = totalPieces > 40 ? 1800 : 1200;
-      result = await window.RotulaNFP.nest(parts, {
-        width: W,
-        height: H
-      }, {
+      const _nfpCfg = extra => Object.assign({
         gap: gap || 0,
         extraInflate: 1.5, // v79: compensa la desviación interna de la decimación (0.8 externa + interna)
         rotations: [0, 90, 180, 270],
@@ -11718,7 +11783,33 @@ async function nestPiecesNFP(pieces, W, H, gap, onProgress) {
         onProgress: frac => {
           if (onProgress) onProgress('place', Math.round(frac * 100), 100);
         }
-      });
+      }, extra || {});
+      const _grouped = !!__NEST_CFG__.groupByRef;
+      const _tNest = Date.now();
+      result = await window.RotulaNFP.nest(parts, { width: W, height: H }, _nfpCfg({ groupByOrder: _grouped }));
+      /* ── v97: GUARDA DE PLACAS del agrupado ──────────────────────────────────────
+         Ordenar por pedido debilita el "grande primero" del FFD. Medido: casi siempre
+         cuesta 0 y a veces mejora, pero puede alargar la placa. Mientras el trabajo cabe
+         en UNA placa eso no gasta material y se acepta sin más. Si salen VARIAS, el
+         agrupado sí puede costar una placa entera: se repite sin agrupar y gana el que
+         menos placas gaste (a igualdad, el de menos alto ocupado). La segunda pasada solo
+         se lanza si queda tiempo de sobra bajo el watchdog de 35 s del llamador. */
+      if (_grouped && result.sheets.length > 1 && Date.now() - _tNest < 8000 &&
+          !(typeof window !== 'undefined' && window.__NEST_CANCEL__ === true)) {
+        const _plain = await window.RotulaNFP.nest(parts, { width: W, height: H }, _nfpCfg({ groupByOrder: false }));
+        const _hUsed = r => (r.sheets || []).reduce((s, sh) => {
+          let my = 0; for (const p of sh) if (p.y + p.h > my) my = p.y + p.h; return s + my;
+        }, 0);
+        const _better = _plain.placedCount > result.placedCount ||
+          (_plain.placedCount === result.placedCount &&
+           (_plain.sheets.length < result.sheets.length ||
+            (_plain.sheets.length === result.sheets.length && _hUsed(_plain) < _hUsed(result) * 0.97)));
+        if (_better) {
+          try { console.warn('[Rotula] agrupar por pedido gastaba más placa (' + result.sheets.length +
+            ' vs ' + _plain.sheets.length + ') → se usa el anidado sin agrupar'); } catch (e) {}
+          result = _plain;
+        }
+      }
     }
     // (v79) eliminado el reintento "ruta WASM": computeNFP fuerza ClipperLib JS, el bloque era
     // inalcanzable/no-op y además referenciaba `timeBudget` fuera de ámbito (ReferenceError latente).
@@ -16717,6 +16808,7 @@ function App() {
   const [gapMM, setGapMM] = useState(__NEST_CFG__.gap);
   const [nfpEngine, setNfpEngine] = useState(__NEST_CFG__.nfp);
   const [groupOrders, setGroupOrders] = useState(__NEST_CFG__.groupOrders !== false); // v82
+  const [groupByRef, setGroupByRef] = useState(__NEST_CFG__.groupByRef !== false); // v97
   const runNesting = async (list, keepEditor) => {
     const srcList = Array.isArray(list) ? list : pieces;
     if (!srcList.length || nesting) return null;
@@ -17982,7 +18074,27 @@ function App() {
       __NEST_CFG__.nfp = e.target.checked;
       setNestResult(null);
     }
-  }), "Motor denso (NFP)")), React.createElement("button", {
+  }), "Motor denso (NFP)"), React.createElement("label", {
+    // v97: interruptor del agrupado blando por pedido (mismo color = misma zona de placa).
+    title: "Anida juntas las piezas del mismo pedido (misma referencia y mismo color). No trocea la placa ni añade pasadas al motor; si agrupar costara una placa de más, se descarta solo.",
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 5,
+      fontSize: 12,
+      color: "#555",
+      fontWeight: 600,
+      cursor: "pointer"
+    }
+  }, React.createElement("input", {
+    type: "checkbox",
+    checked: groupByRef,
+    onChange: e => {
+      setGroupByRef(e.target.checked);
+      __NEST_CFG__.groupByRef = e.target.checked;
+      setNestResult(null);
+    }
+  }), "Agrupar por pedido")), React.createElement("button", {
     onClick: runNesting,
     disabled: nesting,
     className: "btn-glow",
