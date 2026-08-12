@@ -42,6 +42,38 @@
      ║  de cortar; si con la unidad elegida el documento no cabe en ║
      ║  la placa se baja al multiplicador que si cabe, y se avisa.  ║
      ║  El ajuste manual del modal (userScale) sigue mandando.      ║
+     ║  v99: COLOR DE PEDIDO EN EL ARCHIVO, Y CAPA "ESPEC" FUERA.   ║
+     ║  (1) El color por pedido solo existia en pantalla y en el    ║
+     ║  PDF: el DXF/SVG metia todo el corte en la capa "CORTE", asi ║
+     ║  que en VCarve salia todo del mismo color y no habia manera  ║
+     ║  de saber que pieza es de quien (solo se distinguian los     ║
+     ║  pedidos cuyo archivo traia OTRO nombre de capa, p.ej. "MET  ║
+     ║  CORTE" — de ahi que "solo las piezas de arriba" salieran    ║
+     ║  con color). Ahora cada pedido va en su capa, CORTE_<REF>,   ║
+     ║  con el color que tiene en la placa; el tipo de corte queda  ║
+     ║  de prefijo para poder seguir agrupando operaciones en       ║
+     ║  VCarve. El color va en la tabla de capas Y en la entidad    ║
+     ║  (62). Casilla "Capa por pedido" para volver al esquema      ║
+     ║  anterior. Vale para las dos exportaciones (panel y editor). ║
+     ║  De paso, la tabla ACI pasa de 12 entradas a las 249 reales: ║
+     ║  con 12, el color de un pedido caia en el vecino mas cercano ║
+     ║  de una lista minuscula y el primero salia ACI 8, el mismo   ║
+     ║  gris que la placa. Los basicos 1-9 quedan literales, asi    ║
+     ║  que rojo/azul/naranja de las capas de corte no se mueven.   ║
+     ║  (2) La capa ESPEC (cajetin de medidas y notas) se ignora    ║
+     ║  SIEMPRE, en las dos rutas de importacion. En AI/PDF ya caia ║
+     ║  por la lista de anotacion, pero solo si el archivo declaraba║
+     ║  alguna capa de corte; ahora cae igual sin ella. En SVG no   ║
+     ║  caia: el filtro miraba solo el id del <g>, y los            ║
+     ║  conversores AI→SVG del panel de pedidos dejan el nombre en  ║
+     ║  data-layer/data-name del propio <path>. Se miran los dos    ║
+     ║  sitios y se limpia el sufijo de Illustrator ("ESPEC_1_").   ║
+     ║  Una capa que declare corte NUNCA se descarta por esto:      ║
+     ║  "ESPECIAL CORTE" sigue siendo corte. Verificado con los     ║
+     ║  archivos de produccion: BelenTorres.ai da 11 piezas (las 11 ║
+     ║  de CORTE; los 25 trazados de ESPEC fuera).                  ║
+     ║  OJO: un PDF aplanado a UNA sola capa ("Capa 1") no dice que ║
+     ║  es cada cosa — ahi no hay ESPEC que filtrar.                ║
      ║  v98: EL "MOTOR DENSO" DABA EL RESULTADO MENOS DENSO. Con    ║
      ║  letras de PDF bastan 45 piezas de 60-90 vertices para que   ║
      ║  la compuerta de complejidad desvie el trabajo fuera del     ║
@@ -8919,7 +8951,10 @@ const __NEST_CFG__ = {
      abajo-izquierda siguiendo ese orden, las piezas de un pedido caen contiguas sin añadir
      ni una llamada al motor. Medido (banco Node, ver commit): skyline 840 pzs/40 pedidos →
      mismas 6 placas, misma ocupación 80.7%, mismos ms, placas por pedido 3.95 → 1.05. */
-  groupByRef: true
+  groupByRef: true,
+  /* v99: al exportar, una capa por pedido con SU color (DXF y SVG). Apagado = capas por
+     tipo de corte como hasta ahora. */
+  exportByOrder: true
 };
 if (typeof window !== 'undefined') window.__NEST_CFG__ = __NEST_CFG__;
 /* demo-12: sistema de RETALES oculto "por ahora". Un solo interruptor lo apaga por completo:
@@ -9093,7 +9128,26 @@ function tintHex(hex, f) {
    bastante claro para que el corte (color pleno) y las demás capas se lean encima.
    Compartido por el lienzo y el PDF → lo que se ve en pantalla es lo que se imprime. */
 const ORDER_FILL_TINT = 0.55;
-const _ACI_TABLE = [[1, 255, 0, 0], [2, 255, 255, 0], [3, 0, 255, 0], [4, 0, 255, 255], [5, 0, 0, 255], [6, 255, 0, 255], [7, 0, 0, 0], [8, 128, 128, 128], [30, 255, 127, 0], [92, 0, 128, 64], [174, 0, 63, 127], [14, 76, 0, 0]];
+/* v99: paleta ACI COMPLETA. Con las 12 entradas de antes (los colores semánticos de capa)
+   el color de un pedido caía en el vecino más cercano de una lista minúscula: el primer
+   pedido salía en ACI 8, el mismo gris que la capa PLACA, y en VCarve dos pedidos podían
+   acabar del mismo color. Los índices 10-249 de AutoCAD son 24 tonos × 10 variantes de
+   valor/saturación, así que se generan en vez de escribir 240 tripletas. Los básicos 1-9
+   se mantienen literales para que rojo/azul/verde de las capas de corte sigan cayendo
+   exactamente donde caían. */
+const _ACI_TABLE = (() => {
+  const t = [[1, 255, 0, 0], [2, 255, 255, 0], [3, 0, 255, 0], [4, 0, 255, 255], [5, 0, 0, 255],
+    [6, 255, 0, 255], [7, 0, 0, 0], [8, 128, 128, 128], [9, 192, 192, 192]];
+  const VS = [[1, 1], [1, .5], [.75, 1], [.75, .5], [.5, 1], [.5, .5], [.3, 1], [.3, .5], [.15, 1], [.15, .5]];
+  for (let i = 10; i <= 249; i++) {
+    const k = i - 10, h = Math.floor(k / 10) * 15, vs = VS[k % 10], v = vs[0], s = vs[1];
+    const c = v * s, x = c * (1 - Math.abs(h / 60 % 2 - 1)), m = v - c;
+    const seg = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+      : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+    t.push([i, Math.round((seg[0] + m) * 255), Math.round((seg[1] + m) * 255), Math.round((seg[2] + m) * 255)]);
+  }
+  return t;
+})();
 function hexToACI(hex) {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
   if (!m) return 7;
@@ -9672,8 +9726,18 @@ function _toMM(v, u) {
    "MET CORTE", "LATÓN CORTE", "MET CAJEADO"… Normaliza mayúsculas y acentos.
    Devuelve { isCut, capa }. Las capas que NO son de corte (ESPEC, CABLE, DIMENSIONS,
    ESTRUCTURA, TORNILLOS, NEON, MARCAS…) se identifican pero NO generan piezas. */
+const _normLayer = raw => (raw == null ? '' : String(raw)).toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+/* v99: capa de ESPECIFICACIONES. Es el cajet\u00edn de medidas y notas del pedido: nunca se
+   corta, pero llegaba como piezas (25 trazados solo en uno de los archivos de produccion).
+   Se reconoce con separador o sin el ("ESPEC", "ESPEC 2", "ESPEC_COTAS", "ESPECIFICACIONES")
+   y NUNCA se aplica a una capa que declare corte \u2014 "ESPECIAL CORTE" sigue siendo corte. */
+function isSpecLayerName(rawName) {
+  const n = _normLayer(rawName);
+  if (!n || /CORTE|CAJEADO|HENDIDO|AGUJERO|TALADRO/.test(n)) return false;
+  return /(^|[^A-Z])ESPEC/.test(n);
+}
 function classifyLayerName(rawName) {
-  const n = (rawName == null ? '' : String(rawName)).toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  const n = _normLayer(rawName);
   const isCut = /CORTE|CAJEADO|HENDIDO|AGUJERO|TALADRO/.test(n);
   let capa = 'corte';
   if (/AGUJERO|TALADRO/.test(n)) capa = 'taladro';
@@ -10062,6 +10126,10 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul, fit) {
       const _lname = _hasOC ? _layerNameOf(curOC) : null;
       let capa = "corte",
         layerName = _lname || null;
+      /* v99: ESPEC se descarta SIEMPRE, declare o no el archivo capas de corte. El resto
+         de anotaciones sigue exigiendo que exista una capa de corte para no vaciar un
+         archivo cuya única capa se llame "TIPO" o "Capa 1". */
+      if (_lname && isSpecLayerName(_lname)) { _dropAnnot[_lname] = (_dropAnnot[_lname] || 0) + 1; return; }
       if (_lname && _hasCutLayer) {
         const cl = classifyLayerName(_lname);
         if (cl.isAnnot) { _dropAnnot[_lname] = (_dropAnnot[_lname] || 0) + 1; return; } // cajetín/cotas/LED… → no es pieza
@@ -10782,6 +10850,24 @@ const SVG_ANNOTATION_RE = /^(espec|acotac|acot|cota|dim|dimension|texto|text|inf
    NO son corte CNC — se colaban como piezas y solapaban el corte real. "CORTE IMPRESIÓN"
    contiene "CORTE" pero es el contorno del impreso. Se descartan como el cajetín. */
 const SVG_PRINT_MARK_RE = /impres|x[_ -]?mark|^marcas?$|^margen\b/i;
+/* v99: nombre de capa de un nodo SVG.
+   · En un GRUPO, Illustrator pone el nombre de capa en id (Inkscape en inkscape:label);
+     se conserva tal cual porque es el que viaja al DXF exportado.
+   · En un TRAZADO suelto solo valen los atributos que nombran capa de verdad
+     (data-layer, data-name, serif:id…): el id de un <path> suele ser ruido tipo
+     "XMLID_12_" y convertirlo en capa ensuciaria la exportacion.
+   Para COMPARAR con las listas de anotacion se limpia el sufijo que Illustrator añade a
+   los nombres repetidos ("ESPEC_1_" → "ESPEC") y los separadores. */
+const svgGroupNameOf = el => (el && el.getAttribute &&
+  (el.getAttribute("id") || el.getAttribute("inkscape:label") || el.getAttribute("data-name") ||
+   el.getAttribute("data-layer") || el.getAttribute("serif:id")) || "").trim();
+const svgShapeLayerOf = el => (el && el.getAttribute &&
+  (el.getAttribute("data-layer") || el.getAttribute("data-name") ||
+   el.getAttribute("inkscape:label") || el.getAttribute("serif:id")) || "").trim();
+const svgLayerLooksAnnot = name => {
+  const n = String(name || "").replace(/_+\d*_*$/, "").replace(/[_-]+/g, " ").trim();
+  return !!n && (SVG_ANNOTATION_RE.test(n) || SVG_PRINT_MARK_RE.test(n) || isSpecLayerName(n));
+};
 const SVG_SHAPE_TAGS = ["path", "rect", "circle", "ellipse", "polygon", "polyline", "line"];
 const SVG_CONTAINER_TAGS = ["g", "svg", "symbol", "a"];
 const SVG_IGNORED_TAGS = ["defs", "clippath", "mask", "metadata", "title", "desc"];
@@ -10796,16 +10882,22 @@ function collectCuttableElements(root) {
       const tag = child.tagName && child.tagName.toLowerCase();
       if (!tag || SVG_IGNORED_TAGS.includes(tag)) continue;
       if (SVG_CONTAINER_TAGS.includes(tag)) {
-        const groupName = ((child.getAttribute && (child.getAttribute("id") || child.getAttribute("inkscape:label") || child.getAttribute("data-name"))) || "").trim();
-        if (groupName && (SVG_ANNOTATION_RE.test(groupName) || SVG_PRINT_MARK_RE.test(groupName))) {
-          ignoredAnnotations++; // cajetín/anotación/impresión/marca → no es geometría de corte
+        const groupName = svgGroupNameOf(child);
+        if (svgLayerLooksAnnot(groupName)) {
+          ignoredAnnotations++; // cajetín/anotación/impresión/marca/ESPEC → no es geometría de corte
           continue;
         }
         walk(child, transform, groupName || layer); // demo-11: propaga el nombre de capa REAL
         continue;
       }
-      // demo-11: `layer` = capa real del elemento (nombre literal del archivo)
-      if (SVG_SHAPE_TAGS.includes(tag)) elements.push({ el: child, tag, transform, layer });
+      /* v99: la capa tambien puede venir en el PROPIO trazado. Los conversores AI→SVG del
+         panel de pedidos no siempre envuelven cada capa en su <g>: dejan el nombre en
+         data-layer/data-name del <path>, y asi un cajetin ESPEC entraba como pieza. */
+      if (SVG_SHAPE_TAGS.includes(tag)) {
+        const own = svgShapeLayerOf(child);
+        if (svgLayerLooksAnnot(own) || svgLayerLooksAnnot(layer)) { ignoredAnnotations++; continue; }
+        elements.push({ el: child, tag, transform, layer: own || layer });
+      }
     }
   };
   walk(root, "", null);
@@ -12790,11 +12882,23 @@ function ptsToD(pts) {
 function buildDXF(sheet, plateW, plateH, sheetIndex, capas) {
   capas = capas && capas.length ? capas : CAPAS_INIT;
   const geo = extractSheetGeometry(sheet, capas);
-  // v80: nombre de capa DXF por polil\u00ednea = nombre ORIGINAL verbatim (data-layer de
-  // Illustrator/DXF, ej. "LAT\u00d3N CORTE", "AGUJEROS") si existe; si no, la capa del programa.
+  /* v99: UNA CAPA DXF POR PEDIDO. El color por pedido solo exist\u00eda en pantalla y en el PDF
+     de vista previa: el DXF met\u00eda todo el corte en la capa "CORTE", asi que en VCarve
+     salia todo del mismo color y no habia forma de saber que pieza es de quien (solo se
+     distinguian los pedidos cuyo archivo traia OTRO nombre de capa, p.ej. "MET CORTE").
+     Ahora el nombre lleva el pedido detras \u2014 CORTE_AXPVFYZBG-7 \u2014 y la capa toma el COLOR
+     del pedido, el mismo del lienzo y la leyenda. El tipo de corte queda de prefijo, asi
+     que en VCarve las capas se ordenan por operacion y se pueden seleccionar de golpe.
+     Con la casilla "Capa por pedido" apagada se exporta como siempre. */
+  const byOrder = __NEST_CFG__.exportByOrder !== false;
+  const cmap = orderColorMap((sheet && sheet.pieces) || []);
   const layerNameFor = (pl, piece) => {
     const c = capaById(capas, pl.capa || piece.capa || "corte");
-    return { name: dxfLayerVerbatim(pl.layer) || capaDXFName(c), aci: hexToACI(c.color) };
+    const base = dxfLayerVerbatim(pl.layer) || capaDXFName(c);
+    const ref = byOrder ? dxfLayerVerbatim(refOf(piece)).slice(0, 26) : "";
+    return ref
+      ? { name: (base + "_" + ref).slice(0, 60), aci: hexToACI(orderColorOf(piece, cmap) || c.color) }
+      : { name: base, aci: hexToACI(c.color) };
   };
   const usedLayers = new Map(),
     usedOffsetIds = new Set();
@@ -12856,12 +12960,15 @@ function buildDXF(sheet, plateW, plateH, sheetIndex, capas) {
   w(20, 0);
   w(10, 0);
   w(20, 0);
-  const writePoly = (pts, layerName) => {
+  const writePoly = (pts, layerName, aci) => {
     if (pts.length < 2) return;
     const closed = isClosedPts(pts);
     const pp = closed ? pts.slice(0, -1) : pts;
     w(0, "LWPOLYLINE");
     w(8, layerName);
+    // v99: color tambien en la ENTIDAD (62), no solo en la tabla de capas: hay CAM que
+    // importa por color de objeto y asi el pedido se distingue en los dos criterios.
+    if (aci != null) w(62, aci);
     w(90, pp.length);
     w(70, closed ? 1 : 0);
     for (const p of pp) {
@@ -12870,7 +12977,7 @@ function buildDXF(sheet, plateW, plateH, sheetIndex, capas) {
     }
   };
   for (const g of geo) {
-    for (const pl of g.polylines) writePoly(pl, layerNameFor(pl, g.piece).name);
+    for (const pl of g.polylines) { const L = layerNameFor(pl, g.piece); writePoly(pl, L.name, L.aci); }
     for (const off of g.offsets) {
       const lname = capaDXFName(capaById(capas, off.capa)) + "_OFFSET";
       for (const pts of off.polys) writePoly(pts, lname);
@@ -12903,20 +13010,24 @@ function buildSVG(sheet, plateW, plateH, sheetIndex, capas) {
   const geo = extractSheetGeometry(sheet, capas);
   const groups = {};
   // v80: agrupar por nombre de capa VERBATIM (mismo criterio que buildDXF).
-  const groupFor = (capaId, isOffset, layerName) => {
+  // v99: y por PEDIDO, con su color — mismo criterio y mismos nombres que el DXF.
+  const byOrder = __NEST_CFG__.exportByOrder !== false;
+  const cmap = orderColorMap((sheet && sheet.pieces) || []);
+  const groupFor = (capaId, isOffset, layerName, piece) => {
     const c = capaById(capas, capaId);
     const vname = !isOffset && dxfLayerVerbatim(layerName) || null;
-    const key = (vname || c.id) + (isOffset ? "__off" : "");
+    const ref = !isOffset && byOrder && piece ? dxfLayerVerbatim(refOf(piece)).slice(0, 26) : "";
+    const key = (vname || c.id) + (ref ? "|" + ref : "") + (isOffset ? "__off" : "");
     if (!groups[key]) groups[key] = {
-      name: vname || capaDXFName(c) + (isOffset ? "_OFFSET" : ""),
-      color: isOffset ? shadeHex(c.color, -0.4) : c.color,
+      name: (vname || capaDXFName(c) + (isOffset ? "_OFFSET" : "")) + (ref ? "_" + ref : ""),
+      color: isOffset ? shadeHex(c.color, -0.4) : (ref && orderColorOf(piece, cmap)) || c.color,
       ds: []
     };
     return groups[key];
   };
   for (const g of geo) {
-    for (const pl of g.polylines) groupFor(pl.capa || g.piece.capa || "corte", false, pl.layer).ds.push(ptsToD(pl));
-    for (const off of g.offsets) for (const pts of off.polys) groupFor(off.capa, true, null).ds.push(ptsToD(pts));
+    for (const pl of g.polylines) groupFor(pl.capa || g.piece.capa || "corte", false, pl.layer, g.piece).ds.push(ptsToD(pl));
+    for (const off of g.offsets) for (const pts of off.polys) groupFor(off.capa, true, null, null).ds.push(ptsToD(pts));
   }
   let body = '<g id="PLACA"><rect x="0" y="0" width="' + plateW + '" height="' + plateH + '" fill="none" stroke="#000000" stroke-width="0.2"/></g>\n';
   for (const key in groups) {
@@ -13820,25 +13931,37 @@ function edWorldItems(objects, rect) {
         })),
         closed,
         capa: meta && meta.capa || o.capa || "corte",
-        layer: meta && meta.layer || null
+        layer: meta && meta.layer || null,
+        ref: o.__ref || refOf(o) || null // v99: pedido al que pertenece (capa y color del export)
       });
     });
   });
   return items;
 }
-function _edItemsByCapa(items, capas) {
+function _edItemsByCapa(items, capas, cmap) {
   capas = capas && capas.length ? capas : CAPAS_INIT;
   const groups = {};
-  const gFor = (capaId, isOffset, layerName) => {
+  /* v99: una capa por PEDIDO, con el color del pedido — es la exportación del editor, la
+     que se lleva a VCarve. Antes todo el corte caía en la capa "CORTE" y en VCarve salía
+     de un solo color: los pedidos solo se distinguían si su archivo traía otro nombre de
+     capa. El tipo de corte queda de prefijo (CORTE_REF) para poder seguir agrupando
+     operaciones. Casilla "Capa por pedido" para volver al esquema anterior. */
+  const byOrder = __NEST_CFG__.exportByOrder !== false;
+  const gFor = (capaId, isOffset, layerName, ref) => {
     const c = capaById(capas, capaId);
     const vname = !isOffset && dxfLayerVerbatim(layerName) || null; // v80: capa verbatim
-    const key = (vname || c.id) + (isOffset ? "__off" : "");
-    if (!groups[key]) groups[key] = {
-      name: vname || capaDXFName(c) + (isOffset ? "_OFFSET" : ""),
-      color: isOffset ? shadeHex(c.color, -0.4) : c.color,
-      aci: hexToACI(isOffset ? shadeHex(c.color, -0.4) : c.color),
-      lists: []
-    };
+    const r = !isOffset && byOrder && ref ? dxfLayerVerbatim(ref).slice(0, 26) : "";
+    const key = (vname || c.id) + (r ? "|" + r : "") + (isOffset ? "__off" : "");
+    if (!groups[key]) {
+      const col = isOffset ? shadeHex(c.color, -0.4)
+        : (r && ((cmap && cmap.get(String(ref).trim())) || srcColorFor(ref))) || c.color;
+      groups[key] = {
+        name: ((vname || capaDXFName(c) + (isOffset ? "_OFFSET" : "")) + (r ? "_" + r : "")).slice(0, 60),
+        color: col,
+        aci: hexToACI(col),
+        lists: []
+      };
+    }
     return groups[key];
   };
   const offIn = {};
@@ -13849,7 +13972,7 @@ function _edItemsByCapa(items, capas) {
     const closedPts = it.closed ? [...pts, {
       ...pts[0]
     }] : pts;
-    gFor(cid, false, it.layer).lists.push({
+    gFor(cid, false, it.layer, it.ref).lists.push({
       pts: closedPts,
       closed: it.closed
     });
@@ -13865,9 +13988,9 @@ function _edItemsByCapa(items, capas) {
   }
   return groups;
 }
-function edBuildSVG(items, W, H, capas, frames) {
+function edBuildSVG(items, W, H, capas, frames, cmap) {
   frames = frames && frames.length ? frames : [{ x0: 0, y0: 0, w: W, h: H }]; // v80
-  const groups = _edItemsByCapa(items, capas);
+  const groups = _edItemsByCapa(items, capas, cmap);
   let body = '<g id="PLACA">' + frames.map(fr => '<rect x="' + fr.x0 + '" y="' + fr.y0 + '" width="' + fr.w + '" height="' + fr.h + '" fill="none" stroke="#000000" stroke-width="0.2"/>').join('') + '</g>\n';
   for (const key in groups) {
     const gr = groups[key];
@@ -13882,9 +14005,9 @@ function edBuildSVG(items, W, H, capas, frames) {
   }
   return '<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="' + W + 'mm" height="' + H + 'mm" viewBox="0 0 ' + W + ' ' + H + '">\n' + body + '</svg>';
 }
-function edBuildDXF(items, W, H, capas, frames) {
+function edBuildDXF(items, W, H, capas, frames, cmap) {
   frames = frames && frames.length ? frames : [{ x0: 0, y0: 0, w: W, h: H }]; // v80
-  const groups = _edItemsByCapa(items, capas);
+  const groups = _edItemsByCapa(items, capas, cmap);
   const L = [];
   const w = (c, v) => {
     L.push(String(c));
@@ -14088,6 +14211,7 @@ function VectorEditor({
   }]);
   const [nesting, setNesting] = useState(false);
   const [expSheet, setExpSheet] = useState(-1);
+  const [expByOrder, setExpByOrder] = useState(__NEST_CFG__.exportByOrder !== false); // v99
   /* v85: lienzo a pantalla completa (móvil). Pseudo-fullscreen con position:fixed
      — la Fullscreen API es poco fiable desde file:// y requiere gesto+permiso; el
      overlay fijo funciona siempre. El ResizeObserver de wrapRef ya recalcula box
@@ -14623,6 +14747,10 @@ function VectorEditor({
       w: sh.w,
       h: sh.h
     }));
+    /* v99: el reparto de colores por pedido se calcula sobre TODOS los objetos del lienzo,
+       no sobre los de la hoja exportada: así el color de un pedido es el mismo en la placa,
+       en el PDF de vista previa y en cada hoja que se exporte por separado. */
+    const _expCmap = () => orderColorMap(objects.map(o => ({ ref: o.__ref || refOf(o) })));
     const items = edWorldItems(objects, rect);
     if (!items.length) {
       showToast("No hay contornos en esa hoja", "error");
@@ -14630,11 +14758,11 @@ function VectorEditor({
     }
     let content, mime, ext;
     if (fmt === "svg") {
-      content = edBuildSVG(items, W, H, capas, frames);
+      content = edBuildSVG(items, W, H, capas, frames, _expCmap());
       mime = "image/svg+xml";
       ext = "svg";
     } else if (fmt === "dxf") {
-      content = edBuildDXF(items, W, H, capas, frames);
+      content = edBuildDXF(items, W, H, capas, frames, _expCmap());
       mime = "application/dxf";
       ext = "dxf";
     } else {
@@ -15588,7 +15716,15 @@ function VectorEditor({
       fontWeight: 700,
       cursor: "pointer"
     }
-  }, fmt.toUpperCase())))), React.createElement("details", {
+  }, fmt.toUpperCase())), React.createElement("label", {
+    // v99: capa+color por pedido en el archivo exportado (para verlo en VCarve).
+    title: "Cada pedido va en su propia capa del DXF/SVG, con el color que tiene en la placa. Apagado: una capa por tipo de corte, como antes.",
+    style: { display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#555", fontWeight: 600, cursor: "pointer" }
+  }, React.createElement("input", {
+    type: "checkbox",
+    checked: expByOrder,
+    onChange: e => { setExpByOrder(e.target.checked); __NEST_CFG__.exportByOrder = e.target.checked; }
+  }), "Capa por pedido"))), React.createElement("details", {
     className: "ed-fold",
     style: {
       background: "#fff",

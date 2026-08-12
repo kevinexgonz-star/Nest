@@ -101,6 +101,15 @@ La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQ
   aprovechamiento con las mismas placas; lote donde ya ganaba estantes, idéntico.
   El motor Grid respeta además la separación configurada (antes solo se fiaba de su
   rejilla de 50 mm y dos piezas podían quedar a tocar).
+- **El color del pedido viaja al archivo exportado**: cada pedido va en su propia capa del
+  DXF/SVG (`CORTE_<REFERENCIA>`) con el color que tiene en la placa, así en VCarve se ve de
+  quién es cada pieza. El tipo de corte queda de prefijo para poder agrupar operaciones.
+  Se desactiva con la casilla «Capa por pedido» del panel Exportar.
+- **Capas que no se cortan**: cajetines, cotas, marcas de registro y la capa **ESPEC** se
+  ignoran al importar, tanto en AI/PDF (por capa OCG) como en SVG (por `id`, `data-layer`
+  o `data-name`). Una capa que declare corte nunca se descarta por esto («ESPECIAL CORTE»
+  sigue siendo corte). Un PDF aplanado a una sola capa no lleva esa información, así que
+  ahí no hay nada que filtrar.
 - Resumen de material aprovechado (% y m²) por placa.
 - Exportación: DXF R12 y SVG plano por capas; PDF de vista previa a escala real.
 - Persistencia en localStorage.
