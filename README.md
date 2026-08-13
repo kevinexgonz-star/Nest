@@ -62,9 +62,30 @@ espera `{ref, fileName, fileType, content, matName, thk, qty}`. `API_BASE` es
 La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQL**
 (esquema, endpoints y guía de despliegue).
 
+## Nesting
+
+Tres motores, seleccionables en el desplegable **Motor** del panel de nesting:
+
+| Motor | Qué hace | Cuándo |
+|-------|----------|--------|
+| **Forma real** *(por defecto)* | Rasteriza la **silueta** de cada pieza (inflada media separación) a una máscara de ~2 mm y la deja caer por gravedad al hueco más alto y más a la izquierda donde entra, probando los cuatro giros y colándose en los huecos de las letras ya puestas — el mismo resultado entrelazado que da VCarve. Coste lineal en piezas: cientos de letras sin degradar. | Siempre. |
+| NFP | Motor anterior (no-fit polygon, exacto). Por encima de ~40 piezas con contornos complejos su compuerta de complejidad lo desvía a empaquetado por cajas. | Comparar. |
+| Rejilla | El más rápido, por celdas de 50 mm. **No respeta siluetas finas** (puede solapar arte). | Sólo lotes de piezas rectangulares. |
+
+**Cero solapes por construcción** en «Forma real»: la máscara es un *superconjunto*
+del arte (se marca toda celda que el contorno toque, sin umbrales de tinta), sale del
+mismo path que dibuja el lienzo, y se comprueba contra el mismo mapa de bits que luego
+se sella. Medido con lotes de letras en placa 2050×3050 y separación 5 mm: **13–15 %
+menos placa** que el motor anterior, y lotes que pedían 3 placas entran en 2.
+
+**Agrupar por pedido** (casilla del panel): coloca las piezas pedido a pedido por
+**referencia** (`ref`; `fileName` como respaldo), de modo que cada pedido queda en su
+propia banda y se recoge junto de la placa. Aprieta un poco menos —cada pedido se
+apoya sobre el anterior en vez de rellenar sus huecos—: ése es el único trade-off.
+
 ## Funciones
 
-- Nesting automático de piezas irregulares (algoritmo Grid por defecto y motor NFP/DeepNest opt-in).
+- Nesting automático de piezas irregulares (ver arriba).
 - Importación: SVG, DXF, PDF vectorial, Adobe Illustrator (AI).
   - Los rótulos que Illustrator escribe como **un solo trazado compuesto** se reparten en
     una pieza por letra (los huecos de la «a» o la «O» viajan con su letra).

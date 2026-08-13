@@ -1,7 +1,38 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v99 — Nesting · Editor · Capas                  ║
+     ║  ROTULA NEST v100 — Nesting · Editor · Capas                 ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v100: NESTING DE FORMA REAL (nuevo motor por defecto,       ║
+     ║  «Forma real» en el desplegable Motor). El anidado no se      ║
+     ║  parecia al de VCarve por dos motivos distintos:              ║
+     ║   · el motor Grid trabaja en celdas de 50 mm y da una celda   ║
+     ║     por LIBRE si menos del 5% esta entintada, asi que un      ║
+     ║     trazo fino desaparecia del mapa y las letras se PISABAN   ║
+     ║     de verdad (solape medido contra el arte real);            ║
+     ║   · el motor NFP es correcto pero O(n²)·vertices, y su        ║
+     ║     compuerta de complejidad desvia cualquier lote real de    ║
+     ║     rotulacion (>40 piezas, contornos de 90+ vertices) al     ║
+     ║     empaquetado por CAJAS: el hueco de una «A», una «V» o     ║
+     ║     una «L» se tiraba a la basura.                            ║
+     ║  El motor nuevo hace lo que hace VCarve: rasteriza la         ║
+     ║  SILUETA de cada pieza (inflada la mitad de la separacion)    ║
+     ║  a una mascara de bits de ~2 mm y la deja caer por gravedad   ║
+     ║  al hueco mas alto y mas a la izquierda donde entra,          ║
+     ║  probando los cuatro giros y colandose en los huecos de las   ║
+     ║  letras ya puestas. Coste lineal en piezas: cientos de        ║
+     ║  letras sin compuerta que lo desvie. CERO SOLAPES POR         ║
+     ║  CONSTRUCCION — la mascara es un SUPERCONJUNTO del arte (se   ║
+     ║  marca toda celda que el contorno toque, sin umbrales) y se   ║
+     ║  comprueba contra el mismo mapa que luego se sella.           ║
+     ║  Medido con lotes de letras (2050x3050, separacion 5 mm):     ║
+     ║  ~13-15% menos placa, y lotes que pedian 3 placas entran en   ║
+     ║  2. Los motores NFP y Rejilla siguen disponibles en el        ║
+     ║  desplegable, intactos.                                       ║
+     ║  Vuelve ademas AGRUPAR POR PEDIDO, ahora por REFERENCIA (ref, ║
+     ║  con fileName de respaldo) y resuelto dentro del motor: cada  ║
+     ║  pedido se coloca sobre el anterior en bandas limpias, sin    ║
+     ║  trocear pedidos y sin la red anti-solape que antes tenia     ║
+     ║  que montar las bandas a mano.                                ║
      ║  v99: los HUECOS de las letras se soltaban como piezas       ║
      ║  sueltas. Al rellenar, el PDF cierra implicitamente todo     ║
      ║  subtrazo que no traiga `h` (spec: «any subpaths that are    ║
@@ -8846,17 +8877,31 @@ const MATERIALS_INIT = [{
 }];
 const GAP = 5;
 const __NEST_CFG__ = {
+  /* v100: motor por defecto = RASTER de forma real (silueta rasterizada + gravedad).
+     'raster' → nestPiecesRaster · 'nfp' → nestPiecesNFP · 'grid' → nestPieces.
+     `nfp` se mantiene como espejo booleano (engine !== 'grid') para el código antiguo. */
+  engine: 'raster',
   nfp: true,
   gap: GAP,
-  groupOrders: false // demo-6: opcion retirada; los pedidos se distinguen por color (v80), no por bandas
+  groupOrders: false // v100: agrupar por REFERENCIA de pedido (lo activa la casilla del panel)
 };
 if (typeof window !== 'undefined') window.__NEST_CFG__ = __NEST_CFG__;
 /* demo-12: sistema de RETALES oculto "por ahora". Un solo interruptor lo apaga por completo:
    no se carga de localStorage, no se guarda (no acumula memoria), no aparece la pestaña ni el
    panel, y no se generan sobrantes. Poner en true para reactivarlo tal cual estaba. */
 const RETALES_ENABLED = false;
+/* Motor activo. `engine` manda; si falta (config antigua) se deduce de `nfp`.
+   Cada rama degrada al siguiente motor disponible, nunca a nada. */
 function chooseNest() {
-  return __NEST_CFG__.nfp && clipperOK() && typeof window !== 'undefined' && window.RotulaNFP ? nestPiecesNFP : nestPieces;
+  if (typeof window === 'undefined') return nestPieces;
+  const eng = __NEST_CFG__.engine || (__NEST_CFG__.nfp ? 'raster' : 'grid');
+  if (eng === 'grid') return nestPieces;
+  if (eng === 'raster' && window.pieceOutlineMM && window.pieceOutlineMM.bakedPathD) return nestPiecesRaster;
+  return clipperOK() && window.RotulaNFP ? nestPiecesNFP : nestPieces;
+}
+function rasterEngineActive() {
+  return typeof window !== 'undefined' && (__NEST_CFG__.engine || (__NEST_CFG__.nfp ? 'raster' : 'grid')) === 'raster' &&
+    !!(window.pieceOutlineMM && window.pieceOutlineMM.bakedPathD);
 }
 const COLORS = ["#2563eb", "#0891b2", "#059669", "#d97706", "#7c3aed", "#0284c7", "#dc2626", "#16a34a", "#ea580c", "#4f46e5", "#65a30d", "#92400e", "#0d9488", "#ca8a04", "#475569", "#be185d", "#0369a1", "#4d7c0f", "#c2410c", "#6366f1"];
 const CAPAS_INIT = [{
@@ -11262,6 +11307,505 @@ function auditPlacedSheets(sheets, gW, gH) {
   });
   return errors;
 }
+/* ╔══════════════════════════════════════════════════════════════════════════╗
+   ║  v100 · MOTOR RASTER DE FORMA REAL ("como VCarve")                        ║
+   ║                                                                          ║
+   ║  Por qué existe: ni el motor Grid ni el NFP anidaban de verdad un lote   ║
+   ║  de rotulación.                                                          ║
+   ║    · Grid: rejilla de 50 mm y umbral del 5% de tinta por celda. Un       ║
+   ║      trazo fino no llegaba al 5% y la celda salía LIBRE → letras         ║
+   ║      pisadas de verdad (solape medido con el arte real).                 ║
+   ║    · NFP: correcto pero O(n²)·vértices; la compuerta de complejidad      ║
+   ║      (nfpComplexityGate) desvía cualquier trabajo real de letras (>40    ║
+   ║      piezas, contornos de 90+ vértices) al empaquetado por CAJAS         ║
+   ║      (_skylinePack) → el hueco de una "A", una "V" o una "L" se tira.    ║
+   ║                                                                          ║
+   ║  Este motor hace lo que hace VCarve: rasteriza la SILUETA REAL de cada   ║
+   ║  pieza (inflada gap/2) a una máscara de bits de ~2 mm y la deja caer     ║
+   ║  por gravedad al hueco más alto y más a la izquierda donde entra,        ║
+   ║  probando los cuatro giros. Coste lineal en piezas → aguanta lotes de    ║
+   ║  cientos de letras sin compuerta que lo desvíe.                          ║
+   ║                                                                          ║
+   ║  SIN SOLAPE POR CONSTRUCCIÓN — y esta es la propiedad clave:             ║
+   ║    (1) la máscara es un SUPERCONJUNTO del arte: se marca toda celda que  ║
+   ║        el contorno TOQUE (recorrido exacto de rejilla) además del        ║
+   ║        relleno por scanline; nada de umbrales de tinta;                  ║
+   ║    (2) el arte se infla gap/2 ANTES de rasterizar, así que si dos        ║
+   ║        máscaras no comparten celda, los dos artes distan ≥ gap;          ║
+   ║    (3) se comprueba contra el MISMO mapa de bits que luego se sella.     ║
+   ║    (4) la silueta sale de pieceBakedPathD, el mismo path que dibuja el   ║
+   ║        lienzo → máscara y render no pueden desincronizarse.              ║
+   ║                                                                          ║
+   ║  AGRUPADO POR REFERENCIA: con __NEST_CFG__.groupOrders las piezas se     ║
+   ║  colocan pedido a pedido (clave `ref`, o fileName si no hay ref) y se    ║
+   ║  desactiva el "deslizamiento" a huecos ya cerrados, de modo que cada     ║
+   ║  pedido queda por debajo del anterior en sus columnas → bandas limpias   ║
+   ║  sin trocear pedidos. Sin agrupar, el deslizamiento rellena los huecos   ║
+   ║  (máxima densidad). Ese es el único trade-off.                           ║
+   ╚══════════════════════════════════════════════════════════════════════════╝ */
+const RASTER_TARGET_CELLS = 1.6e6; // celdas de placa: ~2 mm en una 2050×3050
+/* Presupuesto de búsqueda por giro. Se puede afinar desde __NEST_CFG__.rasterTune
+   sin tocar el motor (útil para banco de pruebas y para equipos lentos). */
+const RASTER_TUNE = {
+  slideMM: 250,     // cuánto puede "colarse" una pieza dentro de un hueco cerrado
+  candMax: 64,      // posiciones evaluadas por giro (recorridas de mejor a peor)
+  testBudget: 900   // comprobaciones de colisión por giro
+};
+/* Lado de celda en mm. Fino para que la silueta se reconozca, grueso para que la
+   placa entera quepa en memoria y el barrido sea instantáneo. */
+function rasterResFor(W, H) {
+  const r = Math.sqrt(Math.max(1, W * H) / RASTER_TARGET_CELLS);
+  return Math.min(4, Math.max(0.8, Math.round(r * 4) / 4));
+}
+/* Clave de agrupado de un pedido: la REFERENCIA manda (es lo que el fresador lee
+   en el albarán); el nombre de archivo es el respaldo cuando no hay referencia. */
+function orderKeyOf(p) {
+  const r = p && p.ref != null ? String(p.ref).trim() : '';
+  if (r) return r;
+  return (p && p.fileName) || '(manual)';
+}
+/* ── Bits: ¿hay alguna celda ocupada en [a,b] de esta fila? ── */
+function _rasAnyBit(bits, off, a, b) {
+  const wa = a >>> 5, wb = b >>> 5;
+  const hi = (b & 31) === 31 ? -1 : ((1 << ((b & 31) + 1)) - 1);
+  if (wa === wb) return (bits[off + wa] & (hi & (-1 << (a & 31)))) !== 0;
+  if (bits[off + wa] & (-1 << (a & 31))) return true;
+  for (let w = wa + 1; w < wb; w++) if (bits[off + w]) return true;
+  return (bits[off + wb] & hi) !== 0;
+}
+function _rasSetBits(bits, off, a, b) {
+  const wa = a >>> 5, wb = b >>> 5;
+  const hi = (b & 31) === 31 ? -1 : ((1 << ((b & 31) + 1)) - 1);
+  if (wa === wb) { bits[off + wa] |= hi & (-1 << (a & 31)); return; }
+  bits[off + wa] |= (-1 << (a & 31));
+  for (let w = wa + 1; w < wb; w++) bits[off + w] = 0xFFFFFFFF;
+  bits[off + wb] |= hi;
+}
+/* Marca TODA celda que atraviesa el segmento (traversal de rejilla exacto,
+   Amanatides–Woo). Es lo que garantiza que la máscara no pierda un trazo fino. */
+function _rasMarkSeg(cells, mw, mh, x0, y0, x1, y1) {
+  let ix = Math.floor(x0), iy = Math.floor(y0);
+  const ex = Math.floor(x1), ey = Math.floor(y1);
+  const set = (a, b) => { if (a >= 0 && b >= 0 && a < mw && b < mh) cells[b * mw + a] = 1; };
+  set(ix, iy);
+  const dx = x1 - x0, dy = y1 - y0;
+  const adx = Math.abs(dx), ady = Math.abs(dy);
+  const sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1;
+  let tMaxX = adx > 0 ? (dx > 0 ? ix + 1 - x0 : x0 - ix) / adx : Infinity;
+  let tMaxY = ady > 0 ? (dy > 0 ? iy + 1 - y0 : y0 - iy) / ady : Infinity;
+  const tdx = adx > 0 ? 1 / adx : Infinity, tdy = ady > 0 ? 1 / ady : Infinity;
+  const lim = Math.abs(ex - ix) + Math.abs(ey - iy) + 4;
+  let guard = 0;
+  while ((ix !== ex || iy !== ey) && guard++ < lim) {
+    if (tMaxX < tMaxY) { ix += sx; tMaxX += tdx; } else { iy += sy; tMaxY += tdy; }
+    set(ix, iy);
+  }
+}
+/* Relleno de un subtrazo: borde exacto (toda celda que el trazo TOQUE) + interior
+   por scanline en el centro de celda con regla NONZERO. Cada subtrazo se pinta
+   SÓLIDO (los huecos de la "O" cuentan como material): conservador a propósito,
+   evita meter una pieza dentro de otra, igual que VCarve con "Permitir piezas
+   dentro de otras" desmarcado.
+   NONZERO y no par-impar: un trazado que se cruza a sí mismo (pasa en archivos
+   reales de Illustrator) deja huecos con par-impar, y ahí la máscara dejaría de
+   cubrir el arte — que es justo lo que el render pinta y lo que no puede pisarse.
+   Es además la misma regla con la que _sheetsArtworkOverlap mide el solape. */
+function _rasFillPoly(cells, mw, mh, pl, mnx, mny, res) {
+  const n = pl.length;
+  if (n < 3) return;
+  const X = new Float64Array(n), Y = new Float64Array(n);
+  for (let i = 0; i < n; i++) { X[i] = (pl[i].x - mnx) / res; Y[i] = (pl[i].y - mny) / res; }
+  for (let i = 0; i < n; i++) { const j = (i + 1) % n; _rasMarkSeg(cells, mw, mh, X[i], Y[i], X[j], Y[j]); }
+  const xs = [];
+  for (let iy = 0; iy < mh; iy++) {
+    const yc = iy + 0.5;
+    xs.length = 0;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n, ya = Y[i], yb = Y[j];
+      if ((ya <= yc) === (yb <= yc)) continue;
+      xs.push({ x: X[i] + (yc - ya) * (X[j] - X[i]) / (yb - ya), d: ya <= yc ? 1 : -1 });
+    }
+    if (xs.length < 2) continue;
+    xs.sort((a, b) => a.x - b.x);
+    const row = iy * mw;
+    let wind = 0;
+    for (let k = 0; k + 1 < xs.length; k++) {
+      wind += xs[k].d;
+      if (wind === 0) continue;
+      let a = Math.ceil(xs[k].x - 0.5), b = Math.floor(xs[k + 1].x - 0.5);
+      if (a < 0) a = 0;
+      if (b > mw - 1) b = mw - 1;
+      for (let x = a; x <= b; x++) cells[row + x] = 1;
+    }
+  }
+}
+/* Silueta de la pieza en su caja local (mm) para el giro pedido. Sale del MISMO
+   path horneado que pinta el lienzo, así que máscara y dibujo son la misma cosa. */
+function rasterArtPolys(piece, rot) {
+  const w = +piece.w || 0, h = +piece.h || 0;
+  if (!(w > 0 && h > 0)) return null;
+  const swap = rot === 90 || rot === 270;
+  const rw = swap ? h : w, rh = swap ? w : h;
+  const polys = [];
+  const baked = typeof window !== 'undefined' && window.pieceOutlineMM && window.pieceOutlineMM.bakedPathD;
+  if (typeof baked === 'function' && (piece.svgContent || piece.svgRaw) && piece.viewBox) {
+    let d = '';
+    try {
+      d = baked({
+        svgContent: piece.svgContent || piece.svgRaw, viewBox: piece.viewBox,
+        x: 0, y: 0, placedW: rw, placedH: rh, drawW: rw, drawH: rh,
+        rotation: rot, rotated: rot !== 0
+      }) || '';
+    } catch (e) { d = ''; }
+    for (const seg of d.split(/Z\s*/)) {
+      if (!seg.trim()) continue;
+      const pts = seg.replace(/^M/, '').split('L').map(t => {
+        const c = t.split(',');
+        return { x: +c[0], y: +c[1] };
+      }).filter(q => isFinite(q.x) && isFinite(q.y));
+      if (pts.length >= 3) polys.push(pts);
+    }
+  }
+  // Sin vector utilizable (pieza sin svg, o svg con <rect>/<circle>): su rectángulo.
+  if (!polys.length) polys.push([{ x: 0, y: 0 }, { x: rw, y: 0 }, { x: rw, y: rh }, { x: 0, y: rh }]);
+  return { polys, rw, rh };
+}
+/* Infla la silueta gap/2. Todos los subtrazos se orientan igual → el resultado es
+   la unión SÓLIDA inflada (sin agujeros). Si no hay ClipperLib se devuelve tal
+   cual y la separación la pone el margen de celda (ver rasterBuildMask). */
+function rasterInflate(polys, delta) {
+  if (!(delta > 0) || typeof window === 'undefined' || !window.ClipperLib) return polys;
+  try {
+    const CL = window.ClipperLib, S = 1e3;
+    const co = new CL.ClipperOffset(2, 0.25 * S);
+    let added = 0;
+    for (const pl of polys) {
+      if (!pl || pl.length < 3) continue;
+      const p = pl.map(q => ({ X: Math.round(q.x * S), Y: Math.round(q.y * S) }));
+      if (!CL.Clipper.Orientation(p)) p.reverse();
+      co.AddPath(p, CL.JoinType.jtRound, CL.EndType.etClosedPolygon);
+      added++;
+    }
+    if (!added) return polys;
+    const sol = new CL.Paths();
+    co.Execute(sol, delta * S);
+    if (!sol.length) return polys;
+    const out = [];
+    for (const p of sol) if (p.length >= 3) out.push(p.map(q => ({ x: q.X / S, y: q.Y / S })));
+    return out.length ? out : polys;
+  } catch (e) { return polys; }
+}
+/* Máscara de bits de una pieza en un giro: celdas, runs por fila (colisión rápida)
+   y primera/última fila ocupada por columna (caída por gravedad).
+   offX/offY = mm del origen de la máscara respecto al origen de la caja de dibujo
+   (negativos: la máscara sobresale gap/2 por cada lado). */
+function rasterBuildMask(piece, rot, res, gap) {
+  const art = rasterArtPolys(piece, rot);
+  if (!art) return null;
+  const inflated = rasterInflate(art.polys, gap / 2);
+  /* Caja = inflado UNIÓN arte crudo. Lo de fuera de la caja se recorta al pintar,
+     así que si el inflado saliera mal (ver más abajo) y su caja fuese menor que la
+     del arte, se perdería silueta justo por donde luego se solaparía. */
+  let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
+  for (const group of [inflated, art.polys]) for (const pl of group) for (const p of pl) {
+    if (p.x < mnx) mnx = p.x;
+    if (p.y < mny) mny = p.y;
+    if (p.x > mxx) mxx = p.x;
+    if (p.y > mxy) mxy = p.y;
+  }
+  if (!(mxx > mnx && mxy > mny)) return null;
+  /* Si ClipperLib no infló (o gap=0) el margen lo pone la celda: una celda extra por
+     lado mantiene la separación mínima aunque el redondeo del ráster juegue en contra. */
+  const pad = (inflated === art.polys && gap > 0) ? Math.ceil(gap / 2 / res) : 0;
+  mnx -= pad * res; mny -= pad * res; mxx += pad * res; mxy += pad * res;
+  /* La máscara cubre además la CAJA NOMINAL de la pieza (0,0)-(rw,rh) aunque el
+     dibujo no la llene (un trazo centrado por `meet` deja aire a los lados). Sin
+     esto, una pieza cuyo arte no toca los bordes de su caja podía colocarse con la
+     caja asomando fuera de la placa: el arte entraba, pero x+placedW se salía y el
+     resto de la app (sobrantes, editor, export) trabaja con esa caja. Las celdas
+     añadidas van VACÍAS, así que no estorban a nadie al empaquetar. */
+  if (mnx > 0) mnx = 0;
+  if (mny > 0) mny = 0;
+  if (mxx < art.rw) mxx = art.rw;
+  if (mxy < art.rh) mxy = art.rh;
+  const mw = Math.max(1, Math.ceil((mxx - mnx) / res));
+  const mh = Math.max(1, Math.ceil((mxy - mny) / res));
+  if (mw * mh > 4e6) return null; // pieza absurda: que la reporte el llamador
+  const cells = new Uint8Array(mw * mh);
+  for (const pl of inflated) _rasFillPoly(cells, mw, mh, pl, mnx, mny, res);
+  /* Y ENCIMA, el arte SIN inflar. El inflado es sólo el margen de separación y no
+     es de fiar al 100%: ClipperOffset sobre un trazado que se cruza a sí mismo
+     puede devolver una figura que NO contiene al original (medido con letras
+     reales: solape de ~4900 mm² entre una "G" y una "T"). Pintando también el arte
+     crudo, la máscara CONTIENE al arte pase lo que pase — y esa es la única
+     propiedad de la que depende el "cero solapes". */
+  if (inflated !== art.polys) for (const pl of art.polys) _rasFillPoly(cells, mw, mh, pl, mnx, mny, res);
+  if (pad > 0) { // dilatación de respaldo (sin ClipperLib): disco de radio pad
+    const src = cells.slice();
+    for (let y = 0; y < mh; y++) for (let x = 0; x < mw; x++) {
+      if (!src[y * mw + x]) continue;
+      for (let dy = -pad; dy <= pad; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= mh) continue;
+        const ext = Math.floor(Math.sqrt(Math.max(0, pad * pad - dy * dy)));
+        const x0 = Math.max(0, x - ext), x1 = Math.min(mw - 1, x + ext);
+        for (let xx = x0; xx <= x1; xx++) cells[yy * mw + xx] = 1;
+      }
+    }
+  }
+  const rowStart = new Int32Array(mh + 1);
+  const runs = [];
+  let filled = 0;
+  for (let y = 0; y < mh; y++) {
+    rowStart[y] = runs.length;
+    let x = 0;
+    while (x < mw) {
+      if (cells[y * mw + x]) { const s = x; while (x < mw && cells[y * mw + x]) { x++; filled++; } runs.push(s, x - 1); }
+      else x++;
+    }
+  }
+  rowStart[mh] = runs.length;
+  if (!filled) return null;
+  const colFirst = new Int32Array(mw).fill(-1), colLast = new Int32Array(mw).fill(-1);
+  for (let y = 0; y < mh; y++) for (let x = 0; x < mw; x++) {
+    if (!cells[y * mw + x]) continue;
+    if (colFirst[x] < 0) colFirst[x] = y;
+    colLast[x] = y;
+  }
+  return {
+    rot, mw, mh, runs: Int32Array.from(runs), rowStart, colFirst, colLast,
+    offX: mnx, offY: mny, filled
+  };
+}
+function _rasMaskEq(a, b) {
+  if (!a || !b || a.mw !== b.mw || a.mh !== b.mh || a.filled !== b.filled || a.runs.length !== b.runs.length) return false;
+  for (let i = 0; i < a.runs.length; i++) if (a.runs[i] !== b.runs[i]) return false;
+  return true;
+}
+function _rasNewSheet(gW, gH) {
+  const WPR = (gW + 31) >> 5;
+  return { grid: null, pieces: [], bits: new Uint32Array(WPR * gH), WPR, colTop: new Int32Array(gW), maxRow: 0 };
+}
+function _rasFits(sh, m, mx, my, gW, gH) {
+  if (mx < 0 || my < 0 || mx + m.mw > gW || my + m.mh > gH) return false;
+  const bits = sh.bits, WPR = sh.WPR, runs = m.runs, rs = m.rowStart;
+  for (let r = 0; r < m.mh; r++) {
+    const s = rs[r], e = rs[r + 1];
+    if (s === e) continue;
+    const off = (my + r) * WPR;
+    for (let k = s; k < e; k += 2) if (_rasAnyBit(bits, off, mx + runs[k], mx + runs[k + 1])) return false;
+  }
+  return true;
+}
+function _rasStamp(sh, m, mx, my) {
+  const bits = sh.bits, WPR = sh.WPR, runs = m.runs, rs = m.rowStart;
+  for (let r = 0; r < m.mh; r++) {
+    const s = rs[r], e = rs[r + 1];
+    if (s === e) continue;
+    const off = (my + r) * WPR;
+    for (let k = s; k < e; k += 2) _rasSetBits(bits, off, mx + runs[k], mx + runs[k + 1]);
+  }
+  for (let cx = 0; cx < m.mw; cx++) {
+    const cl = m.colLast[cx];
+    if (cl < 0) continue;
+    const t = my + cl + 1;
+    if (t > sh.colTop[mx + cx]) sh.colTop[mx + cx] = t;
+  }
+  if (my + m.mh > sh.maxRow) sh.maxRow = my + m.mh;
+}
+/* Celdas del borde de la pieza que tocan material ya colocado o el borde de la
+   placa. Cuanto más contacto, más encajada queda y menos hueco inservible deja:
+   es el criterio "best fit" que separa un anidado apretado de uno que sólo apila. */
+function _rasContacts(sh, m, mx, my, gW, gH) {
+  const bits = sh.bits, WPR = sh.WPR, runs = m.runs, rs = m.rowStart;
+  let c = 0;
+  for (let r = 0; r < m.mh; r++) {
+    const s = rs[r], e = rs[r + 1];
+    if (s === e) continue;
+    const off = (my + r) * WPR;
+    for (let k = s; k < e; k += 2) {
+      const a = mx + runs[k], b = mx + runs[k + 1];
+      if (a === 0 || _rasAnyBit(bits, off, a - 1, a - 1)) c++;
+      if (b === gW - 1 || _rasAnyBit(bits, off, b + 1, b + 1)) c++;
+    }
+  }
+  for (let cx = 0; cx < m.mw; cx++) {
+    const f = m.colFirst[cx];
+    if (f < 0) continue;
+    const x = mx + cx, yTop = my + f - 1, yBot = my + m.colLast[cx] + 1;
+    if (yTop < 0 || _rasAnyBit(bits, yTop * WPR, x, x)) c++;
+    if (yBot >= gH || _rasAnyBit(bits, yBot * WPR, x, x)) c++;
+  }
+  return c;
+}
+/* Mejor sitio para una pieza en una placa.
+   1) Para cada X se calcula la caída por GRAVEDAD contra el perfil ocupado
+      (colTop − primera fila de la máscara en esa columna): la pieza queda SIEMPRE
+      por debajo de todo lo colocado en sus columnas → no puede solapar.
+   2) Desde ahí se INTENTA SUBIR celda a celda mientras siga entrando: así se cuela
+      en el hueco de una "L", una "V" o una "U" (esto es lo que da el aspecto
+      entrelazado de VCarve). Con agrupado por pedido el deslizamiento va a 0.
+   3) Gana la que menos ALTURA añade a la placa; a igualdad, la que más CONTACTO
+      tiene (encaje) y, a igualdad, la más alta y a la izquierda.
+   Las X se recorren de menor a mayor caída, con poda por cota inferior y tope de
+   trabajo: se mira lo prometedor y se corta, no se barre la placa entera. */
+function _rasFind(sh, masks, gW, gH, slideCap, tune) {
+  const candMax = tune.candMax, testBudget = tune.testBudget;
+  let best = null;
+  for (let ri = 0; ri < masks.length; ri++) {
+    const m = masks[ri];
+    if (!m || m.mw > gW || m.mh > gH) continue;
+    const maxMx = gW - m.mw;
+    const y0 = new Int32Array(maxMx + 1);
+    for (let mx = 0; mx <= maxMx; mx++) {
+      let t = 0;
+      for (let cx = 0; cx < m.mw; cx++) {
+        const f = m.colFirst[cx];
+        if (f < 0) continue;
+        const v = sh.colTop[mx + cx] - f;
+        if (v > t) t = v;
+      }
+      y0[mx] = t;
+    }
+    const order = [];
+    for (let mx = 0; mx <= maxMx; mx++) if (y0[mx] + m.mh <= gH) order.push(mx);
+    order.sort((a, b) => (y0[a] - y0[b]) || (a - b));
+    let tests = 0, evaluated = 0;
+    for (const mx of order) {
+      const base = y0[mx];
+      if (best) {
+        const lb = Math.max(sh.maxRow, Math.max(0, base - slideCap) + m.mh);
+        if (lb > best.res) break; // ordenado por caída: a partir de aquí nadie mejora
+      }
+      let y = base;
+      while (y > 0 && base - y < slideCap && tests < testBudget) {
+        tests++;
+        if (!_rasFits(sh, m, mx, y - 1, gW, gH)) break;
+        y--;
+      }
+      const resRow = Math.max(sh.maxRow, y + m.mh);
+      if (!best || resRow < best.res) best = { mx, y, m, res: resRow, con: _rasContacts(sh, m, mx, y, gW, gH) };
+      else if (resRow === best.res) {
+        const con = _rasContacts(sh, m, mx, y, gW, gH);
+        if (con > best.con || (con === best.con && (y < best.y || (y === best.y && mx < best.mx)))) best = { mx, y, m, res: resRow, con };
+      }
+      if (++evaluated >= candMax || tests >= testBudget) break;
+    }
+  }
+  return best;
+}
+/* Motor raster: misma firma que nestPieces/nestPiecesNFP → intercambiable. */
+async function nestPiecesRaster(pieces, W, H, gap, onProgress) {
+  const res = rasterResFor(W, H);
+  const gW = Math.floor(W / res), gH = Math.floor(H / res);
+  const g = Math.max(0, +gap || 0);
+  const grouped = !!(typeof __NEST_CFG__ !== 'undefined' && __NEST_CFG__.groupOrders);
+  const tune = Object.assign({}, RASTER_TUNE, (typeof __NEST_CFG__ !== 'undefined' && __NEST_CFG__.rasterTune) || {});
+  const slideCap = grouped ? 0 : Math.max(1, Math.round(tune.slideMM / res));
+  const cancelled = () => typeof window !== 'undefined' && window.__NEST_CANCEL__ === true;
+  const src = (pieces || []).filter(p => p && +p.w > 0 && +p.h > 0);
+  if (!src.length) return [{ grid: null, pieces: [] }];
+
+  // ── máscaras (una por pieza distinta × 4 giros), con caché por forma+tamaño ──
+  const shapeCache = new Map();
+  const masksById = {};
+  const oversized = [];
+  const tooBig = new Set();
+  for (let i = 0; i < src.length; i++) {
+    const p = src[i];
+    if (onProgress) onProgress('masks', i + 1, src.length);
+    if (i % 4 === 3) await new Promise(r => setTimeout(r, 0));
+    if (cancelled()) return [{ grid: null, pieces: [] }];
+    /* Descarte por tamaño ANTES de rasterizar: una pieza que no cabe en la placa en
+       ninguno de los dos sentidos no necesita máscara (y una enorme dispararía el
+       tope de celdas con un aviso que no explica nada). */
+    const pw = +p.w + g, ph = +p.h + g;
+    if (!((pw <= W && ph <= H) || (ph <= W && pw <= H))) {
+      tooBig.add(p.id);
+      masksById[p.id] = [];
+      continue;
+    }
+    const key = (p.svgRaw || p.svgContent || '') + '|' + (p.viewBox || '') + '|' + p.w + 'x' + p.h + '|' + g;
+    let set = shapeCache.get(key);
+    if (!set) {
+      set = [];
+      for (const rot of [0, 90, 180, 270]) {
+        const m = rasterBuildMask(p, rot, res, g);
+        if (m && !set.some(x => _rasMaskEq(x, m))) set.push(m);
+      }
+      shapeCache.set(key, set);
+    }
+    masksById[p.id] = set;
+  }
+
+  // ── orden de colocación: por pedido (si toca) y de mayor a menor ──
+  const groupOrder = [];
+  const all = [];
+  src.forEach((p, i) => {
+    const k = orderKeyOf(p);
+    let gi = groupOrder.indexOf(k);
+    if (gi < 0) { gi = groupOrder.length; groupOrder.push(k); }
+    const q = Math.max(1, p.quantity || 1);
+    for (let n = 0; n < q; n++) {
+      all.push({ p, gi, seq: i, area: (+p.w || 0) * (+p.h || 0), iid: (p.id != null ? p.id : 'p' + i) + '-q' + n });
+    }
+  });
+  all.sort((a, b) => (grouped ? a.gi - b.gi : 0) || (b.area - a.area) || (b.p.h - a.p.h) || (a.seq - b.seq));
+
+  const sheets = [];
+  for (let i = 0; i < all.length; i++) {
+    if (cancelled()) break;
+    if (onProgress) onProgress('place', i + 1, all.length);
+    if (i % 4 === 3) await new Promise(r => setTimeout(r, 0));
+    const it = all[i];
+    const masks = masksById[it.p.id];
+    if (!masks || !masks.length) {
+      oversized.push((it.p.label || it.p.id) + ' ' + it.p.w + '×' + it.p.h + 'mm ' +
+        (tooBig.has(it.p.id) ? 'no cabe en placa ' + W + '×' + H + 'mm (separación ' + g + 'mm)' : ': sin silueta utilizable'));
+      continue;
+    }
+    const minSi = Number.isInteger(it.p.forceSheet) && it.p.forceSheet >= 0 ? it.p.forceSheet : 0;
+    while (sheets.length <= minSi) sheets.push(_rasNewSheet(gW, gH));
+    let found = null, si = -1;
+    for (let s = minSi; s < sheets.length; s++) {
+      const b = _rasFind(sheets[s], masks, gW, gH, slideCap, tune);
+      if (b) { found = b; si = s; break; } // la placa más temprana manda: no hace falta mirar más
+    }
+    if (!found) {
+      if (!masks.some(m => m.mw <= gW && m.mh <= gH)) {
+        oversized.push((it.p.label || it.p.id) + ' ' + it.p.w + '×' + it.p.h + 'mm no cabe en placa ' + W + '×' + H);
+        continue;
+      }
+      sheets.push(_rasNewSheet(gW, gH));
+      si = sheets.length - 1;
+      found = _rasFind(sheets[si], masks, gW, gH, slideCap, tune);
+      if (!found) { oversized.push((it.p.label || it.p.id) + ': no colocable'); continue; }
+    }
+    _rasStamp(sheets[si], found.m, found.mx, found.y);
+    const rot = found.m.rot, swap = rot === 90 || rot === 270;
+    const rw = swap ? +it.p.h : +it.p.w, rh = swap ? +it.p.w : +it.p.h;
+    // offX/offY ≤ 0 por construcción (la máscara envuelve la caja) → x,y ≥ 0.
+    // Se redondea a micras: coordenadas limpias para DXF/SVG y sin -0 residual.
+    const px = Math.max(0, Math.round((found.mx * res - found.m.offX) * 1000) / 1000);
+    const py = Math.max(0, Math.round((found.y * res - found.m.offY) * 1000) / 1000);
+    sheets[si].pieces.push({
+      ...it.p,
+      x: px,
+      y: py,
+      placedW: rw, placedH: rh, drawW: rw, drawH: rh,
+      gridW: Math.max(1, Math.ceil(rw / GRID_CELL)), gridH: Math.max(1, Math.ceil(rh / GRID_CELL)),
+      rotated: rot !== 0, rotation: rot,
+      instanceId: it.iid
+    });
+  }
+  if (!sheets.length) sheets.push(_rasNewSheet(gW, gH));
+  const out = sheets.map(sh => ({ grid: null, pieces: sh.pieces }));
+  out._engine = true;
+  out._raster = true;
+  if (grouped) out._grouped = true;
+  if (oversized.length) out._oversized = oversized;
+  return out;
+}
 /* (v79) eliminado __ROTULA_ENGINE__/__engineOn/nestPiecesEngine: motor remoto experimental
    (localhost:8787) nunca invocado desde ninguna ruta de código. */
 function pieceContourMM(piece) {
@@ -11840,7 +12384,7 @@ async function nestGroupedByOrder(srcList, plateW, plateH, gap, onProgress) {
   const orderKeys = [];
   const groupsMap = {};
   srcList.forEach((p, i) => {
-    const k = p.fileName || '(manual)';
+    const k = orderKeyOf(p); // v100: referencia del pedido (fileName como respaldo)
     if (!groupsMap[k]) { groupsMap[k] = []; orderKeys.push(k); }
     groupsMap[k].push({ ...p, __rk: i, quantity: p.quantity || 1 });
   });
@@ -11941,9 +12485,17 @@ async function nestWithRetales(srcList, plateW, plateH, gap, onProgress, retales
   const engine = chooseNest();
   const nfpActive = typeof window !== 'undefined' && !!window.RotulaNFP &&
     (typeof clipperOK === 'function' ? clipperOK() : true);
+  /* v100: con el motor raster el agrupado por REFERENCIA lo resuelve el propio motor
+     (coloca pedido a pedido y desactiva el deslizamiento a huecos ya cerrados), así
+     que no hacen falta bandas montadas a mano ni su red anti-solape. */
+  if (__NEST_CFG__.groupOrders && rasterEngineActive()) {
+    if (retales && retales.length)
+      try { console.warn('[Rotula] "Agrupar por pedido" activo → se ignoran ' + retales.length + ' retal(es) (un retal trocearía los pedidos)'); } catch (e) {}
+    return nestPiecesRaster(srcList, plateW, plateH, gap, onProgress);
+  }
   // v82: agrupar por pedido (archivo) — cada pedido en su banda, en orden de carga.
   if (__NEST_CFG__.groupOrders && __NEST_CFG__.nfp) {
-    const _names = new Set(srcList.map(p => p.fileName || ''));
+    const _names = new Set(srcList.map(p => orderKeyOf(p)));
     if (_names.size > 1) {
       if (!nfpActive) {
         try { console.warn('[Rotula] "Agrupar pedidos" requiere el motor NFP listo → nesting normal'); } catch (e) {}
@@ -16715,8 +17267,8 @@ function App() {
   const nestCancelRef = useRef(null); // v87: rejecter activo del nesting en curso (para Cancelar)
   const [cancelling, setCancelling] = useState(false); // v87: botón Cancelar pulsado
   const [gapMM, setGapMM] = useState(__NEST_CFG__.gap);
-  const [nfpEngine, setNfpEngine] = useState(__NEST_CFG__.nfp);
-  const [groupOrders, setGroupOrders] = useState(__NEST_CFG__.groupOrders !== false); // v82
+  const [nestEngine, setNestEngine] = useState(__NEST_CFG__.engine || "raster"); // v100: forma real | nfp | rejilla
+  const [groupOrders, setGroupOrders] = useState(!!__NEST_CFG__.groupOrders);     // v100: agrupar por REFERENCIA
   const runNesting = async (list, keepEditor) => {
     const srcList = Array.isArray(list) ? list : pieces;
     if (!srcList.length || nesting) return null;
@@ -17686,7 +18238,7 @@ function App() {
     style: {
       color: "#E6007E"
     }
-  }, "v99"))))), tab === "nesting" && React.createElement("div", {
+  }, "v100"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",
@@ -17964,7 +18516,37 @@ function App() {
       fontSize: 12
     }
   }), "mm"), React.createElement("label", {
-    title: "Motor NFP: empaquetado denso con separacion real. Desactivalo para el motor rapido por rejilla de 50mm.",
+    title: "Forma real: anida la silueta de cada pieza (letras entrelazadas, como VCarve). NFP: motor anterior. Rejilla: el mas rapido, por cajas de 50mm.",
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 5,
+      fontSize: 12,
+      color: "#555",
+      fontWeight: 600
+    }
+  }, "Motor", React.createElement("select", {
+    value: nestEngine,
+    onChange: e => {
+      setNestEngine(e.target.value);
+      __NEST_CFG__.engine = e.target.value;
+      __NEST_CFG__.nfp = e.target.value !== "grid"; // espejo para el codigo antiguo
+      setNestResult(null);
+    },
+    style: {
+      padding: "5px 6px",
+      border: "1px solid #e5e5e5",
+      borderRadius: 6,
+      fontSize: 12,
+      fontWeight: 600,
+      color: "#555",
+      background: "#fff"
+    }
+  }, React.createElement("option", { value: "raster" }, "Forma real"),
+     React.createElement("option", { value: "nfp" }, "NFP"),
+     React.createElement("option", { value: "grid" }, "Rejilla"))),
+  React.createElement("label", {
+    title: "Coloca las piezas pedido a pedido (por REFERENCIA) para recogerlas juntas de la placa. Aprieta algo menos: cada pedido se apoya sobre el anterior en vez de rellenar sus huecos.",
     style: {
       display: "flex",
       alignItems: "center",
@@ -17976,13 +18558,13 @@ function App() {
     }
   }, React.createElement("input", {
     type: "checkbox",
-    checked: nfpEngine,
+    checked: groupOrders,
     onChange: e => {
-      setNfpEngine(e.target.checked);
-      __NEST_CFG__.nfp = e.target.checked;
+      setGroupOrders(e.target.checked);
+      __NEST_CFG__.groupOrders = e.target.checked;
       setNestResult(null);
     }
-  }), "Motor denso (NFP)")), React.createElement("button", {
+  }), "Agrupar por pedido")), React.createElement("button", {
     onClick: runNesting,
     disabled: nesting,
     className: "btn-glow",
