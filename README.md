@@ -73,10 +73,19 @@ Tres motores, seleccionables en el desplegable **Motor** del panel de nesting:
 | Rejilla | El más rápido, por celdas de 50 mm. **No respeta siluetas finas** (puede solapar arte). | Sólo lotes de piezas rectangulares. |
 
 **Cero solapes por construcción** en «Forma real»: la máscara es un *superconjunto*
-del arte (se marca toda celda que el contorno toque, sin umbrales de tinta), sale del
-mismo path que dibuja el lienzo, y se comprueba contra el mismo mapa de bits que luego
-se sella. Medido con lotes de letras en placa 2050×3050 y separación 5 mm: **13–15 %
-menos placa** que el motor anterior, y lotes que pedían 3 placas entran en 2.
+del arte (se marca toda celda que el contorno toque, sin umbrales de tinta), se
+comprueba contra el mismo mapa de bits que luego se sella, y la silueta sale de
+`pieceToPolylinesMM` — la geometría **canónica** de la app: la que pinta el lienzo y
+la que sale al DXF/SVG/PDF, recorriendo el SVG con el CTM real de cada elemento
+(`<path>`, `<rect>`, `<circle>`, `<ellipse>`, `<polygon>`, `<polyline>`, `<line>` y
+transforms anidados). Medido con lotes de letras en placa 2050×3050 y separación
+5 mm: **13–15 % menos placa** que el motor anterior, y lotes que pedían 3 placas
+entran en 2.
+
+Por encima de todo hay una **red final**: se comprueba el resultado de *cualquier*
+motor contra esa geometría canónica y, si queda solape real, se rehace con «Forma
+real». Medido sobre 341 letras importadas de SVG, NFP dejaba 19 pares solapados y
+Rejilla 11; con la red, los tres motores dan 0.
 
 **Agrupar por pedido** (casilla del panel): coloca las piezas pedido a pedido por
 **referencia** (`ref`; `fileName` como respaldo), de modo que cada pedido queda en su

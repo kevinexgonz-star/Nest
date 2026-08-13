@@ -2,6 +2,27 @@
      ║  ROTULA NEST v100 — Nesting · Editor · Capas                 ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v100b: SOLAPE con SVG importados. La máscara y la red         ║
+     ║  anti-solape se construían con pieceBakedPathD/pieceOutlineMM, ║
+     ║  que solo leen <path d> y aplican el PRIMER <g transform> a    ║
+     ║  todos. Pero parseSVG envuelve CADA elemento en el suyo        ║
+     ║  (serializeCuttableElement) y admite <rect>, <circle>,         ║
+     ║  <polygon>, <line>: en un archivo real de rotulacion esa       ║
+     ║  geometria no era la que se corta, la mascara salia menor que  ║
+     ║  el dibujo y las piezas SE PISABAN — y la red no lo veia,      ║
+     ║  porque miraba esa misma geometria equivocada. Ahora todo      ║
+     ║  parte de pieceToPolylinesMM, la geometria CANONICA de la app  ║
+     ║  (la que pinta el lienzo y sale al DXF/SVG/PDF), que recorre   ║
+     ║  el SVG con el CTM real de cada elemento. Medido sobre 341     ║
+     ║  letras importadas de SVG: antes NFP dejaba 19 pares           ║
+     ║  solapados y Rejilla 11; ahora los tres motores dan 0.         ║
+     ║  Ademas: red final anti-solape sobre el resultado de           ║
+     ║  CUALQUIER motor (si queda solape real se rehace con el de     ║
+     ║  forma real, que no puede solapar por construccion);           ║
+     ║  _skylinePack ya no apila en (0,0) las piezas que no caben     ║
+     ║  —las reporta—; y los giros de 90 grados se calculan como      ║
+     ║  permutacion exacta, asi la geometria se lee del DOM una vez   ║
+     ║  por forma y no cuatro.                                        ║
      ║  v100: NESTING DE FORMA REAL (nuevo motor por defecto,       ║
      ║  «Forma real» en el desplegable Motor). El anidado no se      ║
      ║  parecia al de VCarve por dos motivos distintos:              ║
@@ -11343,7 +11364,9 @@ function auditPlacedSheets(sheets, gW, gH) {
    ║  sin trocear pedidos. Sin agrupar, el deslizamiento rellena los huecos   ║
    ║  (máxima densidad). Ese es el único trade-off.                           ║
    ╚══════════════════════════════════════════════════════════════════════════╝ */
-const RASTER_TARGET_CELLS = 1.6e6; // celdas de placa: ~2 mm en una 2050×3050
+const RASTER_TARGET_CELLS = 1.6e6;   // celdas de placa: ~2 mm en una 2050×3050
+const RASTER_MIN_INFLATE_MM = 0.35;  // margen mínimo de la máscara aunque separación = 0
+const RASTER_DECIMATE_MM = 0.1;      // decimado del contorno, muy por debajo del margen
 /* Presupuesto de búsqueda por giro. Se puede afinar desde __NEST_CFG__.rasterTune
    sin tocar el motor (útil para banco de pruebas y para equipos lentos). */
 const RASTER_TUNE = {
@@ -11414,10 +11437,19 @@ function _rasFillPoly(cells, mw, mh, pl, mnx, mny, res) {
   const n = pl.length;
   if (n < 3) return;
   const X = new Float64Array(n), Y = new Float64Array(n);
-  for (let i = 0; i < n; i++) { X[i] = (pl[i].x - mnx) / res; Y[i] = (pl[i].y - mny) / res; }
+  let y0 = Infinity, y1 = -Infinity;
+  for (let i = 0; i < n; i++) {
+    X[i] = (pl[i].x - mnx) / res; Y[i] = (pl[i].y - mny) / res;
+    if (Y[i] < y0) y0 = Y[i];
+    if (Y[i] > y1) y1 = Y[i];
+  }
   for (let i = 0; i < n; i++) { const j = (i + 1) % n; _rasMarkSeg(cells, mw, mh, X[i], Y[i], X[j], Y[j]); }
+  /* Solo las filas que el subtrazo puede tocar. Una pieza son muchos subtrazos
+     pequeños (letras, taladros): barrer la máscara entera por cada uno costaba
+     O(subtrazos · alto · vértices) y disparaba el tiempo en rótulos largos. */
+  const iy0 = Math.max(0, Math.floor(y0 - 0.5)), iy1 = Math.min(mh - 1, Math.ceil(y1 + 0.5));
   const xs = [];
-  for (let iy = 0; iy < mh; iy++) {
+  for (let iy = iy0; iy <= iy1; iy++) {
     const yc = iy + 0.5;
     xs.length = 0;
     for (let i = 0; i < n; i++) {
@@ -11439,22 +11471,49 @@ function _rasFillPoly(cells, mw, mh, pl, mnx, mny, res) {
     }
   }
 }
-/* Silueta de la pieza en su caja local (mm) para el giro pedido. Sale del MISMO
-   path horneado que pinta el lienzo, así que máscara y dibujo son la misma cosa. */
-function rasterArtPolys(piece, rot) {
+/* Silueta de la pieza en su caja local (mm) para el giro pedido.
+   FUENTE: pieceToPolylinesMM — la geometría CANÓNICA de la app, la misma que pinta
+   el lienzo y la que sale al DXF/SVG/PDF. Recorre el SVG con el DOM y el CTM real de
+   cada elemento, así que ve <path>, <rect>, <circle>, <ellipse>, <polygon>,
+   <polyline> y <line>, y respeta los transform anidados.
+   NO se usa pieceBakedPathD: solo mira <path d> y aplica el PRIMER <g transform> a
+   todos. parseSVG envuelve CADA elemento en su propio <g transform>
+   (serializeCuttableElement), de modo que en un SVG real de rotulación bakedPathD
+   coloca mal las formas y se salta las que no son <path>. La máscara salía
+   entonces más pequeña que el dibujo y las piezas SE PISABAN (reproducido: 35
+   pares solapados, hasta 20940 mm²). Queda solo como respaldo si el DOM falla. */
+function rasterArtBase(piece) {
   const w = +piece.w || 0, h = +piece.h || 0;
   if (!(w > 0 && h > 0)) return null;
-  const swap = rot === 90 || rot === 270;
-  const rw = swap ? h : w, rh = swap ? w : h;
-  const polys = [];
+  const placed = {
+    ...piece, x: 0, y: 0,
+    placedW: w, placedH: h, drawW: w, drawH: h,
+    rotation: 0, rotated: false
+  };
+  const polys = [], segs = [];
+  try {
+    const pls = (typeof pieceToPolylinesMM === 'function' ? (pieceToPolylinesMM(placed) || {}).polylines : null) || [];
+    for (const pl of pls) {
+      if (!pl || pl.length < 2) continue;
+      const pts = [];
+      for (const q of pl) if (isFinite(q.x) && isFinite(q.y)) pts.push({ x: q.x, y: q.y });
+      /* Las curvas llegan muestreadas punto a punto: se decima muy por debajo del
+         margen de inflado (RASTER_MIN_INFLATE_MM), así que el contorno no puede
+         meterse dentro del arte, y el rasterizado deja de costar una fortuna. */
+      const d = _rasDecimate(pts, RASTER_DECIMATE_MM);
+      if (d.length >= 3) polys.push(d);
+      else if (d.length === 2) segs.push(d); // <line>: se infla como cápsula
+    }
+  } catch (e) {}
+  // Respaldo sin DOM: el path horneado (correcto en piezas de un solo <path>).
   const baked = typeof window !== 'undefined' && window.pieceOutlineMM && window.pieceOutlineMM.bakedPathD;
-  if (typeof baked === 'function' && (piece.svgContent || piece.svgRaw) && piece.viewBox) {
+  if (!polys.length && !segs.length && typeof baked === 'function' && (piece.svgContent || piece.svgRaw) && piece.viewBox) {
     let d = '';
     try {
       d = baked({
         svgContent: piece.svgContent || piece.svgRaw, viewBox: piece.viewBox,
-        x: 0, y: 0, placedW: rw, placedH: rh, drawW: rw, drawH: rh,
-        rotation: rot, rotated: rot !== 0
+        x: 0, y: 0, placedW: w, placedH: h, drawW: w, drawH: h,
+        rotation: 0, rotated: false
       }) || '';
     } catch (e) { d = ''; }
     for (const seg of d.split(/Z\s*/)) {
@@ -11466,14 +11525,57 @@ function rasterArtPolys(piece, rot) {
       if (pts.length >= 3) polys.push(pts);
     }
   }
-  // Sin vector utilizable (pieza sin svg, o svg con <rect>/<circle>): su rectángulo.
-  if (!polys.length) polys.push([{ x: 0, y: 0 }, { x: rw, y: 0 }, { x: rw, y: rh }, { x: 0, y: rh }]);
-  return { polys, rw, rh };
+  // Sin vector utilizable: su rectángulo (conservador, nunca se queda corto).
+  if (!polys.length && !segs.length) polys.push([{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }]);
+  return { polys, segs, w, h };
+}
+/* Decimación Ramer–Douglas–Peucker con desviación acotada por eps (mm). */
+function _rasDecimate(pts, eps) {
+  const n = pts.length;
+  if (n < 16) return pts;
+  const keep = new Uint8Array(n);
+  keep[0] = keep[n - 1] = 1;
+  const stack = [[0, n - 1]], e2 = eps * eps;
+  while (stack.length) {
+    const seg = stack.pop(), a = seg[0], b = seg[1];
+    if (b - a < 2) continue;
+    const ax = pts[a].x, ay = pts[a].y, dx = pts[b].x - ax, dy = pts[b].y - ay, L2 = dx * dx + dy * dy;
+    let dmax = -1, imax = -1;
+    for (let i = a + 1; i < b; i++) {
+      let d;
+      if (L2 === 0) { const ex = pts[i].x - ax, ey = pts[i].y - ay; d = ex * ex + ey * ey; }
+      else { const cr = dx * (pts[i].y - ay) - dy * (pts[i].x - ax); d = cr * cr / L2; }
+      if (d > dmax) { dmax = d; imax = i; }
+    }
+    if (imax >= 0 && dmax > e2) { keep[imax] = 1; stack.push([a, imax], [imax, b]); }
+  }
+  const out = [];
+  for (let i = 0; i < n; i++) if (keep[i]) out.push(pts[i]);
+  return out.length >= 3 ? out : pts;
+}
+/* Silueta para un giro. Los giros de 90° son una permutación EXACTA de las
+   coordenadas sobre la caja de dibujo, idéntica a lo que devuelve
+   pieceToPolylinesMM con ese giro (verificado en banco), así que la geometría se
+   lee del DOM UNA vez por pieza y no cuatro. */
+function rasterArtPolys(base, rot) {
+  if (!base) return null;
+  const w = base.w, h = base.h;
+  const swap = rot === 90 || rot === 270;
+  const map = rot === 90 ? (p => ({ x: h - p.y, y: p.x }))
+    : rot === 180 ? (p => ({ x: w - p.x, y: h - p.y }))
+      : rot === 270 ? (p => ({ x: p.y, y: w - p.x }))
+        : (p => ({ x: p.x, y: p.y }));
+  return {
+    polys: rot ? base.polys.map(pl => pl.map(map)) : base.polys,
+    segs: rot ? base.segs.map(pl => pl.map(map)) : base.segs,
+    rw: swap ? h : w, rh: swap ? w : h
+  };
 }
 /* Infla la silueta gap/2. Todos los subtrazos se orientan igual → el resultado es
-   la unión SÓLIDA inflada (sin agujeros). Si no hay ClipperLib se devuelve tal
-   cual y la separación la pone el margen de celda (ver rasterBuildMask). */
-function rasterInflate(polys, delta) {
+   la unión SÓLIDA inflada (sin agujeros); los tramos abiertos (<line>) se inflan
+   como cápsula. Si no hay ClipperLib se devuelve tal cual y la separación la pone
+   el margen de celda (ver rasterBuildMask). */
+function rasterInflate(polys, segs, delta) {
   if (!(delta > 0) || typeof window === 'undefined' || !window.ClipperLib) return polys;
   try {
     const CL = window.ClipperLib, S = 1e3;
@@ -11484,6 +11586,11 @@ function rasterInflate(polys, delta) {
       const p = pl.map(q => ({ X: Math.round(q.x * S), Y: Math.round(q.y * S) }));
       if (!CL.Clipper.Orientation(p)) p.reverse();
       co.AddPath(p, CL.JoinType.jtRound, CL.EndType.etClosedPolygon);
+      added++;
+    }
+    for (const sg of (segs || [])) {
+      if (!sg || sg.length < 2) continue;
+      co.AddPath(sg.map(q => ({ X: Math.round(q.x * S), Y: Math.round(q.y * S) })), CL.JoinType.jtRound, CL.EndType.etOpenRound);
       added++;
     }
     if (!added) return polys;
@@ -11499,24 +11606,28 @@ function rasterInflate(polys, delta) {
    y primera/última fila ocupada por columna (caída por gravedad).
    offX/offY = mm del origen de la máscara respecto al origen de la caja de dibujo
    (negativos: la máscara sobresale gap/2 por cada lado). */
-function rasterBuildMask(piece, rot, res, gap) {
-  const art = rasterArtPolys(piece, rot);
+function rasterBuildMask(base, rot, res, gap) {
+  const art = rasterArtPolys(base, rot);
   if (!art) return null;
-  const inflated = rasterInflate(art.polys, gap / 2);
+  /* Inflado nunca por debajo de RASTER_MIN_INFLATE_MM: aunque la separación sea 0,
+     hace falta un margen que absorba el muestreo de curvas y el redondeo del ráster
+     para que la máscara siga conteniendo al arte. */
+  const delta = Math.max(gap / 2, RASTER_MIN_INFLATE_MM);
+  const inflated = rasterInflate(art.polys, art.segs, delta);
   /* Caja = inflado UNIÓN arte crudo. Lo de fuera de la caja se recorta al pintar,
      así que si el inflado saliera mal (ver más abajo) y su caja fuese menor que la
      del arte, se perdería silueta justo por donde luego se solaparía. */
   let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
-  for (const group of [inflated, art.polys]) for (const pl of group) for (const p of pl) {
+  for (const group of [inflated, art.polys, art.segs]) for (const pl of group) for (const p of pl) {
     if (p.x < mnx) mnx = p.x;
     if (p.y < mny) mny = p.y;
     if (p.x > mxx) mxx = p.x;
     if (p.y > mxy) mxy = p.y;
   }
   if (!(mxx > mnx && mxy > mny)) return null;
-  /* Si ClipperLib no infló (o gap=0) el margen lo pone la celda: una celda extra por
-     lado mantiene la separación mínima aunque el redondeo del ráster juegue en contra. */
-  const pad = (inflated === art.polys && gap > 0) ? Math.ceil(gap / 2 / res) : 0;
+  /* Si ClipperLib no infló el margen lo pone la celda: una celda extra por lado
+     mantiene la separación mínima aunque el redondeo del ráster juegue en contra. */
+  const pad = (inflated === art.polys) ? Math.max(1, Math.ceil(delta / res)) : 0;
   mnx -= pad * res; mny -= pad * res; mxx += pad * res; mxy += pad * res;
   /* La máscara cubre además la CAJA NOMINAL de la pieza (0,0)-(rw,rh) aunque el
      dibujo no la llene (un trazo centrado por `meet` deja aire a los lados). Sin
@@ -11532,7 +11643,11 @@ function rasterBuildMask(piece, rot, res, gap) {
   const mh = Math.max(1, Math.ceil((mxy - mny) / res));
   if (mw * mh > 4e6) return null; // pieza absurda: que la reporte el llamador
   const cells = new Uint8Array(mw * mh);
+  const cx = p => (p.x - mnx) / res, cy = p => (p.y - mny) / res;
   for (const pl of inflated) _rasFillPoly(cells, mw, mh, pl, mnx, mny, res);
+  // tramos abiertos (<line>): su trazo, por si el inflado no los cubrió
+  for (const sg of art.segs) for (let i = 0; i + 1 < sg.length; i++)
+    _rasMarkSeg(cells, mw, mh, cx(sg[i]), cy(sg[i]), cx(sg[i + 1]), cy(sg[i + 1]));
   /* Y ENCIMA, el arte SIN inflar. El inflado es sólo el margen de separación y no
      es de fiar al 100%: ClipperOffset sobre un trazado que se cruza a sí mismo
      puede devolver una figura que NO contiene al original (medido con letras
@@ -11729,8 +11844,9 @@ async function nestPiecesRaster(pieces, W, H, gap, onProgress) {
     let set = shapeCache.get(key);
     if (!set) {
       set = [];
-      for (const rot of [0, 90, 180, 270]) {
-        const m = rasterBuildMask(p, rot, res, g);
+      const base = rasterArtBase(p); // geometría leída del DOM UNA vez por forma
+      if (base) for (const rot of [0, 90, 180, 270]) {
+        const m = rasterBuildMask(base, rot, res, g);
         if (m && !set.some(x => _rasMaskEq(x, m))) set.push(m);
       }
       shapeCache.set(key, set);
@@ -11880,11 +11996,24 @@ function _sheetsArtworkOverlap(mappedSheets) {
   try {
     if (typeof window === 'undefined' || !window.ClipperLib) return false;
     const baked = window.pieceOutlineMM && window.pieceOutlineMM.bakedPathD;
-    if (typeof baked !== 'function') return false;
     const CL = window.ClipperLib, S = 1e3;
     const artPolys = p => {
-      const d = baked({ ...p, svgContent: p.svgContent || p.svgRaw });
       const polys = [];
+      /* v100: PRIMERO la geometría canónica (pieceToPolylinesMM): es lo que se dibuja
+         y lo que se corta, y ve todos los tipos de elemento con su transform real.
+         bakedPathD solo lee <path d> y aplica el PRIMER <g transform> a todos, y
+         parseSVG envuelve CADA elemento en el suyo → con un SVG real esta red medía
+         una geometría que no era la de la placa y dejaba pasar solapes de verdad. */
+      try {
+        const pls = (typeof pieceToPolylinesMM === 'function' ? (pieceToPolylinesMM(p) || {}).polylines : null) || [];
+        for (const pl of pls) {
+          if (!pl || pl.length < 3) continue;
+          const c = [];
+          for (const q of pl) if (isFinite(q.x) && isFinite(q.y)) c.push({ X: Math.round(q.x * S), Y: Math.round(q.y * S) });
+          if (c.length >= 3) polys.push(c);
+        }
+      } catch (e) {}
+      const d = (!polys.length && typeof baked === 'function') ? baked({ ...p, svgContent: p.svgContent || p.svgRaw }) : '';
       if (d) {
         for (const seg of d.split(/Z\s*/)) {
           if (!seg.trim()) continue;
@@ -12044,10 +12173,13 @@ function _skylinePack(parts, binW, binH, gap) {
     if (!place(it)) {
       if (cur.length) { sheets.push(cur); cur = []; }
       sky = [{ x: 0, y: 0, w: binW }];
-      if (!place(it)) { // pieza mayor que la hoja: colocar igual en 0,0 (no perder piezas)
-        cur.push(placedRect(it.id, 0, 0, it.w0, it.h0, 0));
-        addRect(0, 0, it.w0 + g, it.h0 + g);
-      }
+      /* v100: si NI EN PLACA VACÍA entra, la pieza NO se coloca. Antes se soltaba en
+         (0,0) "para no perder piezas", pero varias piezas grandes acababan APILADAS
+         ahí y salían solapadas de verdad a la placa (medido: 6 pares, 120910 mm²), y
+         encima las redes anti-solape no podían arreglarlo porque su propio
+         reempaquetado hacía lo mismo. El llamador ya cuenta las que faltan y las
+         reporta en _oversized: mejor un aviso claro que un solape mudo. */
+      if (!place(it)) continue;
     }
   }
   if (cur.length) sheets.push(cur);
@@ -12481,7 +12613,36 @@ async function nestGroupedByOrder(srcList, plateW, plateH, gap, onProgress) {
    Nesting reutilizando retales, filtrado por material/grosor, consumo de los
    usados y cálculo de sobrantes. (RETALES_ENABLED controla si se usa.)
    ═══════════════════════════════════════════════════════════════════════════ */
+/* ── RED FINAL ANTI-SOLAPE (v100) ─────────────────────────────────────────────
+   Ningún motor puede sacar piezas pisadas a la placa. Los motores NFP y Rejilla
+   deducen la forma de la pieza con pieceOutlineMM / máscaras de 50 mm, y con un
+   SVG real de rotulación (cada elemento en su propio <g transform>, mezclando
+   <path> con <rect>/<circle>/<polygon>) esa forma NO es la que se corta: medido
+   sobre un lote de 341 letras, NFP dejaba 19 pares solapados y Rejilla 11. Sus
+   propias redes no lo arreglaban porque su reempaquetado parte de la misma
+   geometría equivocada.
+   Aquí se comprueba el resultado contra la geometría CANÓNICA (la que se dibuja y
+   se corta) y, si hay solape real, se rehace con el motor de forma real, que no
+   puede solapar por construcción. Solo corre si el motor elegido NO era el raster
+   (su salida ya es correcta y la comprobación costaría tiempo para nada). */
 async function nestWithRetales(srcList, plateW, plateH, gap, onProgress, retales) {
+  const res = await _nestSinRedFinal(srcList, plateW, plateH, gap, onProgress, retales);
+  try {
+    if (res && res.length && !res._raster && typeof nestPiecesRaster === 'function' &&
+        typeof window !== 'undefined' && window.__NEST_CANCEL__ !== true && _sheetsArtworkOverlap(res)) {
+      console.warn('[Rotula] el motor elegido dejó piezas solapadas en la placa → se rehace con el motor de forma real');
+      const alt = await nestPiecesRaster(srcList, plateW, plateH, gap, onProgress);
+      if (alt && alt.length && !_sheetsArtworkOverlap(alt)) {
+        alt._rescatado = true;
+        return alt;
+      }
+    }
+  } catch (e) {
+    try { console.warn('[Rotula] red final anti-solape no pudo ejecutarse:', e && e.message); } catch (e2) {}
+  }
+  return res;
+}
+async function _nestSinRedFinal(srcList, plateW, plateH, gap, onProgress, retales) {
   const engine = chooseNest();
   const nfpActive = typeof window !== 'undefined' && !!window.RotulaNFP &&
     (typeof clipperOK === 'function' ? clipperOK() : true);
