@@ -78,7 +78,14 @@ La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQ
   solo lo que queda entero dentro (ventana, línea continua); hacia la *izquierda*, todo lo que
   el rectángulo toque (cruce, línea discontinua). El cruce se calcula contra la geometría real,
   no contra la caja envolvente.
-- Capas de corte: Corte / Hendido / Cajeado (con offset) / Taladros / personalizadas.
+- Capas de corte: Corte / Hendido / Cajeado / Taladros / personalizadas. **Sin offset
+  automático**: el programa no genera contornos paralelos por su cuenta (el offset de
+  fresado lo pone el CAM con su herramienta). Se puede reactivar por capa en «Ajustes
+  avanzados».
+- El panel **Capas** lista las capas **del archivo** (`CORTE`, `CAJEADO`, `AGUJEROS`…) con
+  el número de trazados de cada una, y esos mismos nombres son los que van al DXF/SVG
+  exportado. Solo si el archivo llega sin nombres de capa se muestran las cuatro por
+  defecto.
 - Detección automática de capas por color al importar.
 - Identificación de pedidos en la placa **por color**: cada pieza se rellena del color de su
   pedido y la lista de referencias (color → referencia + uds.) va **debajo de la placa**, no

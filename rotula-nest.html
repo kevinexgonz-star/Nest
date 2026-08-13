@@ -42,6 +42,24 @@
      ║  de cortar; si con la unidad elegida el documento no cabe en ║
      ║  la placa se baja al multiplicador que si cabe, y se avisa.  ║
      ║  El ajuste manual del modal (userScale) sigue mandando.      ║
+     ║  v101: FUERA EL OFFSET AUTOMATICO (capa CAJEADO_OFFSET). La  ║
+     ║  capa Cajeado venia de fabrica con offsetMM 5, asi que el    ║
+     ║  programa generaba POR SU CUENTA un contorno paralelo por    ║
+     ║  cada cajeado: un segundo perfil dentro de cada letra en el  ║
+     ║  lienzo y geometria real en el DXF, en una capa que nadie    ║
+     ║  habia dibujado. El offset de fresado lo pone el CAM con su  ║
+     ║  herramienta, no el nesting. Ahora es 0 de fabrica y el      ║
+     ║  valor guardado de versiones anteriores se pone a cero al    ║
+     ║  cargar (si no, a quien ya lo tuviera en localStorage le     ║
+     ║  seguirian saliendo). El control sigue en Ajustes avanzados. ║
+     ║  Verificado con el .ai de produccion: el DXF sale con        ║
+     ║  CORTE / CAJEADO / AGUJEROS / OPOS y ni un _OFFSET.          ║
+     ║  Y el panel Capas ya lista las capas DEL ARCHIVO (AGUJEROS   ║
+     ║  22, CORTE 15, CAJEADO 15, OPOS 2) en vez de las cuatro por  ║
+     ║  defecto: eso ya funcionaba (docLayers), pero solo si el     ║
+     ║  archivo trae los nombres — con el SVG convertido del panel  ║
+     ║  llegan vacios y por eso se veian Corte/Hendido/Cajeado/     ║
+     ║  Taladros. Misma causa que el cajetin de v100.               ║
      ║  v100: EL CAJETIN SEGUIA ENTRANDO POR LA RUTA SVG. El panel  ║
      ║  de pedidos manda SVG convertido del .ai, y cada conversor   ║
      ║  deja el nombre de capa en un sitio distinto: Illustrator en ║
@@ -9001,9 +9019,15 @@ const CAPAS_INIT = [{
   offsetMM: 0
 }, {
   id: "cajeado",
+  /* v101: SIN offset automático. Con offsetMM > 0 el programa generaba, por su cuenta, un
+     contorno paralelo por cada cajeado y lo exportaba en una capa CAJEADO_OFFSET: vectores
+     que nadie había dibujado, que aparecían en el lienzo como un segundo perfil dentro de
+     cada letra y llegaban a VCarve como geometría real. El offset de fresado lo decide el
+     CAM con su herramienta, no el nesting. El control sigue en "Ajustes avanzados" para
+     quien lo quiera, pero de fábrica no se genera nada. */
   name: "Cajeado",
   color: "#00A651",
-  offsetMM: 5
+  offsetMM: 0
 }, {
   id: "taladro",
   name: "Taladros",
@@ -16628,7 +16652,18 @@ function App() {
   const [dragOver, setDragOver] = useState(false);
   const [toast, setToast] = useState(null);
   const fileRef = useRef(null);
-  const [capas, setCapas] = useState(() => LS.get("np-capas-v1", CAPAS_INIT));
+  /* v101: el offset guardado de versiones anteriores se pone a cero al cargar. Sin esto, a
+     quien ya tuviera capas en localStorage le seguirían saliendo los contornos automáticos
+     por mucho que cambie el valor de fábrica. Se hace una sola vez y se reescribe. */
+  const [capas, setCapas] = useState(() => {
+    const saved = LS.get("np-capas-v1", null);
+    if (!saved || !saved.length) return CAPAS_INIT;
+    if (!saved.some(c => c && c.offsetMM > 0)) return saved;
+    const limpio = saved.map(c => ({ ...c, offsetMM: 0 }));
+    try { LS.set("np-capas-v1", limpio); } catch (e) {}
+    try { console.info('[Rotula] offset automático de capas desactivado (ya no se generan contornos _OFFSET); se puede volver a poner en Ajustes avanzados'); } catch (e) {}
+    return limpio;
+  });
   const saveCapas = c => {
     setCapas(c);
     LS.set("np-capas-v1", c);
