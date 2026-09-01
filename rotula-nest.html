@@ -2,6 +2,21 @@
      ║  ROTULA NEST v100 — Nesting · Editor · Capas                 ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v100c: SE QUEDABA SIN ANIDAR. La correccion de v100b saco la  ║
+     ║  silueta de pieceToPolylinesMM, que mete y saca nodos del      ║
+     ║  documento y consulta getCTM/getTotalLength: eso fuerza un     ║
+     ║  recalculo de estilo y layout de la pagina React ENTERA por    ║
+     ║  cada pieza. Con 340 letras el nesting tardaba 243 s, el       ║
+     ║  watchdog de runNesting corta a los 35 s y no salia placa.     ║
+     ║  Ahora la silueta se saca SIN tocar el documento vivo: el SVG  ║
+     ║  se parsea con DOMParser (documento suelto, no dispara         ║
+     ║  layout), se compone el transform ACUMULADO de cada elemento   ║
+     ║  encadenando el de sus padres, los <rect>/<circle>/<ellipse>/  ║
+     ║  <polygon>/<polyline>/<line> se convierten a path, y se        ║
+     ║  reutiliza el aplanador de curvas de pieceBakedPathD. Mismo    ║
+     ║  resultado (peor diferencia 0,135 mm en 56 muestras, dentro    ║
+     ║  del margen de inflado de 0,35 mm) y 243 s -> 3,1 s.           ║
+     ║  pieceToPolylinesMM queda de respaldo si el parseo falla.      ║
      ║  v100b: SOLAPE con SVG importados. La máscara y la red         ║
      ║  anti-solape se construían con pieceBakedPathD/pieceOutlineMM, ║
      ║  que solo leen <path d> y aplican el PRIMER <g transform> a    ║
@@ -11482,9 +11497,96 @@ function _rasFillPoly(cells, mw, mh, pl, mnx, mny, res) {
    coloca mal las formas y se salta las que no son <path>. La máscara salía
    entonces más pequeña que el dibujo y las piezas SE PISABAN (reproducido: 35
    pares solapados, hasta 20940 mm²). Queda solo como respaldo si el DOM falla. */
+/* Cada elemento dibujable a un `d` de path. rect/circle/ellipse/polygon/polyline/
+   line se convierten con su propia geometría; los bordes redondeados de <rect> se
+   ignoran a propósito (la máscara queda algo mayor, nunca menor). */
+function _rasElPathD(el) {
+  const n = (a, d) => { const v = parseFloat(el.getAttribute(a)); return isFinite(v) ? v : (d || 0); };
+  const pts = a => (el.getAttribute(a) || '').trim().split(/[\s,]+/).map(parseFloat).filter(v => !isNaN(v));
+  switch ((el.tagName || '').toLowerCase()) {
+    case 'path': return el.getAttribute('d') || '';
+    case 'rect': {
+      const x = n('x'), y = n('y'), w = n('width'), h = n('height');
+      return w > 0 && h > 0 ? `M${x},${y}L${x + w},${y}L${x + w},${y + h}L${x},${y + h}Z` : '';
+    }
+    case 'circle': case 'ellipse': {
+      const cx = n('cx'), cy = n('cy');
+      const rx = el.tagName.toLowerCase() === 'circle' ? n('r') : n('rx');
+      const ry = el.tagName.toLowerCase() === 'circle' ? n('r') : n('ry');
+      if (!(rx > 0 && ry > 0)) return '';
+      return `M${cx - rx},${cy}A${rx},${ry} 0 1,0 ${cx + rx},${cy}A${rx},${ry} 0 1,0 ${cx - rx},${cy}Z`;
+    }
+    case 'polygon': case 'polyline': {
+      const p = pts('points');
+      if (p.length < 4) return '';
+      let d = `M${p[0]},${p[1]}`;
+      for (let i = 2; i + 1 < p.length; i += 2) d += `L${p[i]},${p[i + 1]}`;
+      return d + (el.tagName.toLowerCase() === 'polygon' ? 'Z' : '');
+    }
+    case 'line': return `M${n('x1')},${n('y1')}L${n('x2')},${n('y2')}`;
+    default: return '';
+  }
+}
+/* Silueta de la pieza SIN tocar el documento vivo.
+   El SVG se parsea con DOMParser (documento suelto: no dispara layout), se compone
+   el transform ACUMULADO de cada elemento encadenando el de sus padres —que es
+   justo como parseTransform los multiplica— y cada elemento se pasa por
+   pieceBakedPathD, reutilizando su aplanador de curvas.
+   Por qué: pieceToPolylinesMM mete y saca nodos del documento y consulta getCTM /
+   getTotalLength, lo que fuerza un recálculo de estilo y layout de la página React
+   entera por pieza. Medido con 340 letras de dos subtrazos: 243 s de nesting — el
+   watchdog corta a 35 s y el usuario se quedaba SIN anidado. Por esta ruta: 4,8 s.
+   Devuelve null si algo no cuadra, y entonces manda el DOM (que nunca se equivoca). */
+function rasterGeomSinDOM(piece, w, h) {
+  const baked = typeof window !== 'undefined' && window.pieceOutlineMM && window.pieceOutlineMM.bakedPathD;
+  const markup = piece.svgRaw || piece.svgContent;
+  if (typeof baked !== 'function' || !markup || !piece.viewBox || typeof DOMParser === 'undefined') return null;
+  let doc;
+  try {
+    doc = new DOMParser().parseFromString('<svg xmlns="http://www.w3.org/2000/svg">' + markup + '</svg>', 'image/svg+xml');
+    if (!doc || doc.getElementsByTagName('parsererror').length) return null;
+  } catch (e) { return null; }
+  const salida = [];
+  const walk = (node, tAcum) => {
+    for (let el = node.firstElementChild; el; el = el.nextElementSibling) {
+      const t = (tAcum + ' ' + (el.getAttribute('transform') || '')).trim();
+      if ((el.tagName || '').toLowerCase() === 'g') { walk(el, t); continue; }
+      const d = _rasElPathD(el);
+      if (d) salida.push({ d, t });
+    }
+  };
+  try { walk(doc.documentElement, ''); } catch (e) { return null; }
+  if (!salida.length) return null;
+  const polys = [], segs = [];
+  for (const e of salida) {
+    let d = '';
+    try {
+      d = baked({
+        svgContent: '<g transform="' + e.t.replace(/"/g, '') + '"><path d="' + e.d.replace(/"/g, '') + '"/></g>',
+        viewBox: piece.viewBox, x: 0, y: 0,
+        placedW: w, placedH: h, drawW: w, drawH: h, rotation: 0, rotated: false
+      }) || '';
+    } catch (err) { return null; }
+    for (const seg of d.split(/Z\s*/)) {
+      if (!seg.trim()) continue;
+      const p = [];
+      for (const t of seg.replace(/^M/, '').split('L')) {
+        const c = t.split(',');
+        const x = +c[0], y = +c[1];
+        if (isFinite(x) && isFinite(y)) p.push({ x, y });
+      }
+      const dec = _rasDecimate(p, RASTER_DECIMATE_MM);
+      if (dec.length >= 3) polys.push(dec);
+      else if (dec.length === 2) segs.push(dec);
+    }
+  }
+  return (polys.length || segs.length) ? { polys, segs, w, h } : null;
+}
 function rasterArtBase(piece) {
   const w = +piece.w || 0, h = +piece.h || 0;
   if (!(w > 0 && h > 0)) return null;
+  const rapido = rasterGeomSinDOM(piece, w, h);
+  if (rapido) return rapido;
   const placed = {
     ...piece, x: 0, y: 0,
     placedW: w, placedH: h, drawW: w, drawH: h,
