@@ -1,7 +1,23 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v99 — Nesting · Editor · Capas                  ║
+     ║  ROTULA NEST v100 — Nesting · Editor · Capas                 ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v100: MAQUETACION COMO EN VCARVE. (1) Cada pedido se anida  ║
+     ║  en su BLOQUE compacto (motor raster de forma real, giros    ║
+     ║  exactos en celdas) y su codigo se rotula FUERA de la placa  ║
+     ║  junto al bloque, en el color del pedido; encima, el         ║
+     ║  material ("PVC 3MM NEGRO"). Lienzo, DXF, SVG y PDF rotulan  ║
+     ║  igual, con fuente de trazo propia (vectores). (2) DXF/SVG:  ║
+     ║  una capa por pedido con su color ACI —el mismo que se ve en ║
+     ║  VCarve— y su rotulo en "<codigo> ETIQUETA". (3) Piezas      ║
+     ║  importadas SIEMPRE espejadas (PDF/AI, DXF, SVG). Fallos:    ║
+     ║  las piezas se exportaban ENCOGIDAS (viewBox con 1 mm de     ║
+     ║  margen dibujado en w×h sin margen: un guion de 91,7 mm      ║
+     ║  salia de 57); la cantidad del pedido solo multiplicaba la   ║
+     ║  primera pieza; DXF importado fuera de su viewBox; SVG con   ║
+     ║  transform de grupo mal medido; Form XObject sin su matriz;  ║
+     ║  el DXF rotulaba el nombre de cada pieza encima; y el color  ║
+     ║  de plancha (negro/blanco) no separaba lotes.                ║
      ║  v99: los HUECOS de las letras se soltaban como piezas       ║
      ║  sueltas. Al rellenar, el PDF cierra implicitamente todo     ║
      ║  subtrazo que no traiga `h` (spec: «any subpaths that are    ║
@@ -8553,6 +8569,7 @@ return ret;
   "use strict";
   const NSEG = 18; // segmentos por curva
 
+  const mulM = (a,b)=>[a[0]*b[0]+a[2]*b[1], a[1]*b[0]+a[3]*b[1], a[0]*b[2]+a[2]*b[3], a[1]*b[2]+a[3]*b[3], a[0]*b[4]+a[2]*b[5]+a[4], a[1]*b[4]+a[3]*b[5]+a[5]];
   function parseTransform(str) {
     let m = [1,0,0,1,0,0];
     if (!str) return m;
@@ -8570,6 +8587,25 @@ return ret;
     return m;
   }
   const applyM=(m,x,y)=>({x:m[0]*x+m[2]*y+m[4], y:m[1]*x+m[3]*y+m[5]});
+  /* v100: recorre los <g>/<path> con una PILA de transformaciones. Antes se leía solo el
+     PRIMER <g transform> y se aplicaba a todos los paths, así que un SVG con transform por
+     elemento —o el espejo de v100 envolviendo al volteo del DXF— daba un contorno de
+     nesting desplazado respecto del dibujo real. cb(d, matriz acumulada) por cada path. */
+  function eachPathWithMatrix(svg, cb){
+    const re=/<(\/?)(g|path)\b([^>]*?)(\/?)>/gi; const stack=[[1,0,0,1,0,0]]; let t;
+    while((t=re.exec(svg||''))){
+      const closing=t[1]==='/', tag=t[2].toLowerCase(), attrs=t[3]||'', selfClose=t[4]==='/';
+      const top=stack[stack.length-1];
+      const tr=(attrs.match(/\stransform="([^"]*)"/)||[])[1];
+      if(tag==='g'){
+        if(closing){ if(stack.length>1) stack.pop(); }
+        else if(!selfClose) stack.push(tr?mulM(top,parseTransform(tr)):top);
+      } else if(!closing){
+        const d=(attrs.match(/\sd="([^"]*)"/)||[])[1];
+        if(d) cb(d, tr?mulM(top,parseTransform(tr)):top);
+      }
+    }
+  }
 
   function flattenPath(d) {
     const subs=[]; let cur=null, sx=0,sy=0, x=0,y=0, px=0,py=0, prevC=null;
@@ -8618,15 +8654,11 @@ return ret;
     const vbX=vb[0],vbY=vb[1],vbW=vb[2],vbH=vb[3];
     if(!(vbW>0&&vbH>0)) return null;
     const w=piece.w||vbW, h=piece.h||vbH;
-    // transform del wrapper <g> (si lo hay) — aplica a todos los paths
-    const gT = (piece.svgRaw.match(/<g[^>]*\stransform="([^"]*)"/)||[])[1];
-    const gM = parseTransform(gT);
-    // todos los <path d="...">
-    const dRe=/<path[^>]*\sd="([^"]*)"/g; let pm; const polys=[];
-    while((pm=dRe.exec(piece.svgRaw))){
-      const subs=flattenPath(pm[1]);
-      for(const s of subs){ if(s.length>=3) polys.push(s.map(p=>applyM(gM,p[0],p[1]))); }
-    }
+    // todos los <path d="..."> con su transformación acumulada (v100: pila de <g>)
+    const polys=[];
+    eachPathWithMatrix(piece.svgRaw,(d,M)=>{
+      for(const s of flattenPath(d)){ if(s.length>=3) polys.push(s.map(p=>applyM(M,p[0],p[1]))); }
+    });
     if(!polys.length) return null;
     const fitScale=Math.min(w/vbW, h/vbH);
     const padX=(w-vbW*fitScale)/2, padY=(h-vbH*fitScale)/2;
@@ -8656,16 +8688,125 @@ return ret;
     const fit=Math.min(drawW/nvbW, drawH/nvbH);
     const padX=(drawW-nvbW*fit)/2, padY=(drawH-nvbH*fit)/2;
     const a=rot*Math.PI/180, C=Math.cos(a), S=Math.sin(a);
-    const gT=(p.svgContent.match(/<g[^>]*\stransform="([^"]*)"/)||[])[1];
-    const gM=parseTransform(gT);
-    const map=(px,py)=>{ const w=applyM(gM,px,py); let X=w.x,Y=w.y;
+    const map=(M,px,py)=>{ const w=applyM(M,px,py); let X=w.x,Y=w.y;
       if(rot){const dx=X-cx,dy=Y-cy; X=cx+C*dx-S*dy; Y=cy+S*dx+C*dy;}
       return [drawX+padX+(X-nvbMinX)*fit, drawY+padY+(Y-nvbMinY)*fit]; };
-    const dRe=/<path[^>]*\sd="([^"]*)"/g; let pm; let d='';
-    while((pm=dRe.exec(p.svgContent))){ for(const s of flattenPath(pm[1])){ if(s.length>=2){
-      d+='M'+s.map(q=>{const m=map(q[0],q[1]);return m[0].toFixed(2)+','+m[1].toFixed(2);}).join('L')+'Z '; } } }
+    let d='';
+    eachPathWithMatrix(p.svgContent,(pd,M)=>{ for(const s of flattenPath(pd)){ if(s.length>=2){
+      d+='M'+s.map(q=>{const m=map(M,q[0],q[1]);return m[0].toFixed(2)+','+m[1].toFixed(2);}).join('L')+'Z '; } } });
     return d.trim();
   }
+  /* v100: TODAS las formas de la pieza (path, polygon, polyline, rect, circle, ellipse,
+     line) como polilíneas en mm en su caja natural [0,w]×[0,h], sin DOM y con aplanado
+     ADAPTATIVO (flecha ≤ tolMM). Es lo que rasteriza el nesting por bloques: muestrear con
+     getPointAtLength cada 0,5 mm costaba ~0,3 s por letra con curvas (14 s un rótulo de 52
+     letras) y el aplanado fijo de flattenPath (18 tramos por curva) se queda corto en curvas
+     grandes. Las curvas se aplanan ya transformadas a mm (afín: conserva la Bézier). */
+  function pieceShapesMM(piece, tolMM){
+    if(!piece||!piece.svgRaw||!piece.viewBox) return null;
+    const vb=piece.viewBox.split(/[\s,]+/).map(Number);
+    if(!(vb[2]>0&&vb[3]>0)) return null;
+    const w=piece.w||vb[2], h=piece.h||vb[3];
+    const fit=Math.min(w/vb[2], h/vb[3]);
+    const padX=(w-vb[2]*fit)/2, padY=(h-vb[3]*fit)/2;
+    const tol=tolMM>0?tolMM:0.05;
+    const out=[];
+    const toMMm=M=>mulM([fit,0,0,fit,padX-vb[0]*fit,padY-vb[1]*fit],M);
+    const bez=(P,cur)=>{ // P: 4 puntos ya en mm
+      const rec=(a,b,c,d,depth)=>{
+        const dx=d.x-a.x, dy=d.y-a.y, L2=dx*dx+dy*dy;
+        let flat;
+        if(L2<1e-12) flat=Math.max(Math.hypot(b.x-a.x,b.y-a.y),Math.hypot(c.x-a.x,c.y-a.y))<=tol;
+        else { const e=Math.abs((b.x-d.x)*dy-(b.y-d.y)*dx)+Math.abs((c.x-d.x)*dy-(c.y-d.y)*dx); flat=e*e<=tol*tol*L2; }
+        if(flat||depth>=12){ cur.push(d); return; }
+        const m=(u,v)=>({x:(u.x+v.x)/2,y:(u.y+v.y)/2});
+        const ab=m(a,b), bc=m(b,c), cd=m(c,d), abc=m(ab,bc), bcd=m(bc,cd), mid=m(abc,bcd);
+        rec(a,ab,abc,mid,depth+1); rec(mid,bcd,cd,d,depth+1);
+      };
+      rec(P[0],P[1],P[2],P[3],0);
+    };
+    const scaleOf=M=>Math.max(Math.hypot(M[0],M[1]),Math.hypot(M[2],M[3]))||1;
+    const ellipsePts=(M,cx,cy,rx,ry)=>{
+      const k=scaleOf(M)*Math.max(rx,ry);
+      const n=Math.max(16,Math.ceil(Math.PI/Math.acos(Math.max(-1,1-tol/Math.max(k,tol)))));
+      const pts=[]; for(let i=0;i<=n;i++){const a=2*Math.PI*i/n; pts.push(applyM(M,cx+rx*Math.cos(a),cy+ry*Math.sin(a)));}
+      return pts;
+    };
+    const pathPolys=(d,M)=>{
+      const toks=d.match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?)(?:e[-+]?\d+)?/gi)||[];
+      let i=0, cur=null, x=0,y=0,sx=0,sy=0,px=0,py=0,prevC=null;
+      const num=()=>parseFloat(toks[i++]);
+      const P=(X,Y)=>applyM(M,X,Y);
+      const flush=()=>{ if(cur&&cur.length>1) out.push(cur); cur=null; };
+      while(i<toks.length){
+        let c=toks[i];
+        if(/[a-zA-Z]/.test(c)) i++; else { if(!prevC) { i++; continue; } c=prevC; }
+        const rel=c>='a'&&c<='z', C=c.toUpperCase();
+        if(C==='M'){ let X=num(),Y=num(); if(rel){X+=x;Y+=y;} flush(); cur=[P(X,Y)]; x=sx=X; y=sy=Y; prevC=rel?'l':'L'; continue; }
+        if(!cur) cur=[P(x,y)];
+        if(C==='L'){ let X=num(),Y=num(); if(rel){X+=x;Y+=y;} cur.push(P(X,Y)); x=X;y=Y; }
+        else if(C==='H'){ let X=num(); if(rel)X+=x; cur.push(P(X,y)); x=X; }
+        else if(C==='V'){ let Y=num(); if(rel)Y+=y; cur.push(P(x,Y)); y=Y; }
+        else if(C==='C'||C==='S'){
+          let x1,y1; if(C==='C'){x1=num();y1=num(); if(rel){x1+=x;y1+=y;}} else { const pc=(prevC||'').toUpperCase(); x1=pc==='C'||pc==='S'?2*x-px:x; y1=pc==='C'||pc==='S'?2*y-py:y; }
+          let x2=num(),y2=num(),X=num(),Y=num(); if(rel){x2+=x;y2+=y;X+=x;Y+=y;}
+          bez([P(x,y),P(x1,y1),P(x2,y2),P(X,Y)],cur); px=x2;py=y2;x=X;y=Y;
+        }
+        else if(C==='Q'||C==='T'){
+          let qx,qy; if(C==='Q'){qx=num();qy=num(); if(rel){qx+=x;qy+=y;}} else { const pc=(prevC||'').toUpperCase(); qx=pc==='Q'||pc==='T'?2*x-px:x; qy=pc==='Q'||pc==='T'?2*y-py:y; }
+          let X=num(),Y=num(); if(rel){X+=x;Y+=y;}
+          bez([P(x,y),P(x+2/3*(qx-x),y+2/3*(qy-y)),P(X+2/3*(qx-X),Y+2/3*(qy-Y)),P(X,Y)],cur); px=qx;py=qy;x=X;y=Y;
+        }
+        else if(C==='A'){
+          let rx=Math.abs(num()),ry=Math.abs(num()),phi=num(),fa=num(),fs=num(),X=num(),Y=num(); if(rel){X+=x;Y+=y;}
+          if(!rx||!ry){ cur.push(P(X,Y)); }
+          else {
+            phi=phi*Math.PI/180; const dx=(x-X)/2,dy=(y-Y)/2;
+            const x1p=Math.cos(phi)*dx+Math.sin(phi)*dy, y1p=-Math.sin(phi)*dx+Math.cos(phi)*dy;
+            let lam=x1p*x1p/(rx*rx)+y1p*y1p/(ry*ry); if(lam>1){const q=Math.sqrt(lam);rx*=q;ry*=q;}
+            const sg=fa!==fs?1:-1; let nu=rx*rx*ry*ry-rx*rx*y1p*y1p-ry*ry*x1p*x1p; nu=nu<0?0:nu;
+            const co=sg*Math.sqrt(nu/(rx*rx*y1p*y1p+ry*ry*x1p*x1p||1)); const cxp=co*rx*y1p/ry, cyp=-co*ry*x1p/rx;
+            const cx=Math.cos(phi)*cxp-Math.sin(phi)*cyp+(x+X)/2, cy=Math.sin(phi)*cxp+Math.cos(phi)*cyp+(y+Y)/2;
+            const ang=(ux,uy,vx,vy)=>{const dd=Math.sqrt((ux*ux+uy*uy)*(vx*vx+vy*vy))||1;let k=(ux*vx+uy*vy)/dd;k=Math.max(-1,Math.min(1,k));let a=Math.acos(k);if(ux*vy-uy*vx<0)a=-a;return a;};
+            const th0=ang(1,0,(x1p-cxp)/rx,(y1p-cyp)/ry); let dth=ang((x1p-cxp)/rx,(y1p-cyp)/ry,(-x1p-cxp)/rx,(-y1p-cyp)/ry);
+            if(!fs&&dth>0)dth-=2*Math.PI; if(fs&&dth<0)dth+=2*Math.PI;
+            const k=scaleOf(M)*Math.max(rx,ry), step=2*Math.acos(Math.max(-1,1-tol/Math.max(k,tol)));
+            const n=Math.max(2,Math.ceil(Math.abs(dth)/Math.max(step,1e-3)));
+            for(let q=1;q<=n;q++){const th=th0+dth*q/n; cur.push(P(Math.cos(phi)*rx*Math.cos(th)-Math.sin(phi)*ry*Math.sin(th)+cx, Math.sin(phi)*rx*Math.cos(th)+Math.cos(phi)*ry*Math.sin(th)+cy));}
+          }
+          x=X;y=Y;
+        }
+        else if(C==='Z'){ cur.push(P(sx,sy)); flush(); x=sx;y=sy; }
+        else { i++; }
+        prevC=c;
+      }
+      flush();
+    };
+    const re=/<(\/?)(g|path|polygon|polyline|rect|circle|ellipse|line)\b([^>]*?)(\/?)>/gi; const stack=[[1,0,0,1,0,0]]; let t;
+    const attr=(a,n)=>{const m=a.match(new RegExp('\\s'+n+'="([^"]*)"'));return m?m[1]:null;};
+    const nattr=(a,n)=>parseFloat(attr(a,n))||0;
+    while((t=re.exec(piece.svgRaw))){
+      const closing=t[1]==='/', tag=t[2].toLowerCase(), a=t[3]||'', selfClose=t[4]==='/';
+      const top=stack[stack.length-1];
+      const tr=attr(a,'transform');
+      if(tag==='g'){ if(closing){ if(stack.length>1) stack.pop(); } else if(!selfClose) stack.push(tr?mulM(top,parseTransform(tr)):top); continue; }
+      if(closing) continue;
+      const M=toMMm(tr?mulM(top,parseTransform(tr)):top);
+      if(tag==='path'){ const d=attr(a,'d'); if(d) pathPolys(d,M); }
+      else if(tag==='polygon'||tag==='polyline'){
+        const nums=(attr(a,'points')||'').trim().split(/[\s,]+/).map(parseFloat).filter(v=>!isNaN(v));
+        const pts=[]; for(let k=0;k+1<nums.length;k+=2) pts.push(applyM(M,nums[k],nums[k+1]));
+        if(tag==='polygon'&&pts.length) pts.push({...pts[0]});
+        if(pts.length>1) out.push(pts);
+      }
+      else if(tag==='rect'){ const X=nattr(a,'x'),Y=nattr(a,'y'),W=nattr(a,'width'),H=nattr(a,'height'); if(W>0&&H>0) out.push([applyM(M,X,Y),applyM(M,X+W,Y),applyM(M,X+W,Y+H),applyM(M,X,Y+H),applyM(M,X,Y)]); }
+      else if(tag==='circle'){ const r=nattr(a,'r'); if(r>0) out.push(ellipsePts(M,nattr(a,'cx'),nattr(a,'cy'),r,r)); }
+      else if(tag==='ellipse'){ const rx=nattr(a,'rx'),ry=nattr(a,'ry'); if(rx>0&&ry>0) out.push(ellipsePts(M,nattr(a,'cx'),nattr(a,'cy'),rx,ry)); }
+      else if(tag==='line'){ out.push([applyM(M,nattr(a,'x1'),nattr(a,'y1')),applyM(M,nattr(a,'x2'),nattr(a,'y2'))]); }
+    }
+    return out;
+  }
+  pieceOutlineMM.shapes = pieceShapesMM;
   pieceOutlineMM.bakedPathD = pieceBakedPathD;
   return pieceOutlineMM;
 });
@@ -8848,7 +8989,15 @@ const GAP = 5;
 const __NEST_CFG__ = {
   nfp: true,
   gap: GAP,
-  groupOrders: false // demo-6: opcion retirada; los pedidos se distinguen por color (v80), no por bandas
+  /* v100: cada pedido se anida en su propio BLOQUE compacto de la placa (como se maqueta a
+     mano en VCarve), con su referencia rotulada fuera de la placa junto al bloque. Ver
+     nestByOrderBlocks. Apagado = nesting libre de siempre (piezas de pedidos mezcladas). */
+  groupOrders: true,
+  /* v100: las piezas importadas entran ESPEJADAS (volteo horizontal). Las letras se cortan
+     boca abajo —cara vista contra la bancada—, así que el DXF tiene que llevarlas en espejo,
+     igual que se maquetan en VCarve. Se aplica en los tres importadores (PDF/AI, DXF, SVG)
+     sobre la geometría de origen, así nesting, lienzo, editor y exportación ven lo mismo. */
+  mirror: true
 };
 if (typeof window !== 'undefined') window.__NEST_CFG__ = __NEST_CFG__;
 /* demo-12: sistema de RETALES oculto "por ahora". Un solo interruptor lo apaga por completo:
@@ -8891,13 +9040,26 @@ const capaById = (capas, id) => capas.find(c => c.id === id) || capas[0] || CAPA
    de Illustrator (ej. "LAT\u00d3N CORTE"); solo elimina comillas y caracteres de control.
    VCarve/Aspire leen estos nombres sin problema (es lo mismo que exporta Illustrator). */
 const dxfLayerVerbatim = name => String(name == null ? "" : name).replace(/[\x00-\x1f"]/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
-/* v80: color determinista por archivo de origen (distinguir pedidos). Paleta que evita
-   los colores sem\u00e1nticos de capa (rojo=corte, azul=hendido, verde=cajeado, naranja/cian=taladro). */
-const SRC_PALETTE = ["#7c3aed", "#0d9488", "#b45309", "#be185d", "#4338ca", "#15803d", "#a21caf", "#0369a1", "#854d0e", "#334155",
-// v94: paleta ampliada — con 10 colores dos pedidos del mismo lote repetían color y ya no
-// se distinguían. Tonos separados entre sí y de los colores de capa (#FF0000 corte,
-// #0000FF hendido, #00A651 cajeado, #FF7F00 taladro).
-"#9d174d", "#1e40af", "#3f6212", "#7e22ce", "#0f766e", "#92400e", "#155e75", "#6d28d9"];
+/* ── v100: COLORES DE PEDIDO = colores ACI de AutoCAD/VCarve ─────────────────────────
+   VCarve pinta cada capa con un color ACI (la tabla de 256 colores del DXF). La paleta de
+   pedidos se elige DENTRO de esa tabla para que el operario vea en VCarve exactamente el
+   mismo color que en la vista previa: verde, magenta, turquesa, ámbar… como en su maqueta.
+   Antes eran tonos oscuros sin equivalente ACI y en el DXF varios pedidos caían en el
+   mismo color. Se evitan el rojo/azul/naranja puros de las capas de corte/hendido/taladro. */
+function aciRGB(i) {
+  const BASE = { 1: [255, 0, 0], 2: [255, 255, 0], 3: [0, 255, 0], 4: [0, 255, 255], 5: [0, 0, 255], 6: [255, 0, 255], 7: [0, 0, 0], 8: [128, 128, 128], 9: [192, 192, 192] };
+  if (BASE[i]) return BASE[i]; // el 7 es blanco sobre fondo negro y negro sobre blanco (VCarve)
+  if (i >= 250 && i <= 255) { const g = [51, 91, 132, 173, 214, 255][i - 250]; return [g, g, g]; }
+  if (!(i >= 10 && i <= 249)) return [0, 0, 0];
+  const hue = Math.floor((i - 10) / 10) * 15, v = (i - 10) % 10;
+  const val = [1, 1, 0.8, 0.8, 0.6, 0.6, 0.5, 0.5, 0.3, 0.3][v], sat = v % 2 ? 0.5 : 1;
+  const c = val * sat, x = c * (1 - Math.abs(hue / 60 % 2 - 1)), m = val - c;
+  const t = hue < 60 ? [c, x, 0] : hue < 120 ? [x, c, 0] : hue < 180 ? [0, c, x] : hue < 240 ? [0, x, c] : hue < 300 ? [x, 0, c] : [c, 0, x];
+  return t.map(q => Math.round((q + m) * 255));
+}
+const aciHex = i => "#" + aciRGB(i).map(v => v.toString(16).padStart(2, "0")).join("");
+const ORDER_ACI = [92, 212, 112, 42, 152, 7, 192, 132, 32, 232, 62, 142, 172, 34, 202, 52, 124, 14, 74, 244];
+const SRC_PALETTE = ORDER_ACI.map(aciHex);
 const srcColorFor = fileName => {
   if (!fileName) return null;
   let h = 0;
@@ -8910,14 +9072,68 @@ const srcColorFor = fileName => {
    refOf() la extrae del pedido (campo ref del panel) o, en su defecto, del nombre de
    archivo sin extensión, quitando los sufijos que añade el reparto de piezas/cantidades
    ("#2", "1/3"). Es la clave del color y del rótulo que se pinta en la placa. */
+/* v100: los archivos del panel se llaman "<CÓDIGO>-<línea>-<cliente>.pdf"
+   (BDKGQVISY-1-Herminio-Lopez.pdf). Sin campo ref, la referencia es "<CÓDIGO>-<línea>" y no
+   el nombre entero con el cliente, que no cabía como rótulo junto a la placa. */
+const ORDER_FILE_RE = /^([A-Z0-9]{6,}-\d{1,3})(?=[-_ .(]|$)/i;
 const refOf = p => {
   if (!p) return "";
   if (p.ref) return String(p.ref).trim();
   const lab = String(p.label || "").replace(/\s*#\s*\d+\s*$/, "").replace(/\s+\d+\s*\/\s*\d+\s*$/, "").trim();
   if (lab && !/^(pdf|svg|dxf|pieza|pdfv)\b/i.test(lab)) return lab;
   const fn = String(p.fileName || "").replace(/\.[^.]+$/, "").trim();
-  return fn || lab;
+  const m = ORDER_FILE_RE.exec(fn);
+  return m ? m[1].toUpperCase() : fn || lab;
 };
+/* v100: CÓDIGO DE PEDIDO — lo que rotula el operario junto a cada bloque en VCarve
+   ("BDKGQVISY", no "BDKGQVISY-1"). Las líneas de un mismo pedido que caen en la misma placa
+   son un solo bloque, un solo color y un solo rótulo. Solo se quita el sufijo "-N" de los
+   códigos alfanuméricos largos del panel; una referencia libre ("PED-001") queda intacta. */
+const orderCodeOf = ref => {
+  const s = String(ref == null ? "" : ref).trim();
+  const m = /^([A-Z0-9]{6,})-\d{1,3}$/i.exec(s);
+  return m ? m[1] : s;
+};
+// Solo hay pedido si la pieza trae referencia o archivo de origen: una forma dibujada en el
+// editor o una pieza de la demo no es un pedido (ni bloque propio, ni rótulo junto a la placa).
+const orderKeyOf = p => p && (p.ref || p.fileName) ? orderCodeOf(refOf(p)) : "";
+// Clave de COLOR: el pedido si lo hay; si no, la referencia de siempre (v94).
+const colorKeyOf = p => orderKeyOf(p) || refOf(p);
+/* v100: piezas de un pedido recibido (panel/BD). La cantidad del pedido son COPIAS DEL
+   DISEÑO ENTERO: un rótulo de 6 letras ×2 son 12 letras. Antes solo la primera pieza
+   recibía la cantidad (`i === 0 ? qty : 1`) —herencia de cuando cada archivo era una sola
+   pieza— y de "AGENCY ×2" se cortaban dos "A" y una de cada otra letra. */
+function orderToPieces(o, parsed, matName) {
+  const multi = parsed.length > 1;
+  const copies = Math.max(1, Math.round(+o.qty || 1));
+  return parsed.map((p, i) => ({
+    ...p,
+    id: "in-" + Date.now() + "-" + (o.ref || "o") + "-" + i,
+    fileName: o.fileName || (o.ref || "pedido") + "." + (o.fileType || "svg"),
+    ref: o.ref || null, // v94: referencia del pedido (color + rótulo en la placa)
+    label: o.ref ? o.ref + (multi ? " #" + (i + 1) : "") : p.label,
+    quantity: Math.max(1, p.quantity || 1) * copies,
+    forceSheet: null,
+    mat: matName,
+    matColor: orderMatColor(o) || null
+  }));
+}
+/* v100: color de la plancha del pedido ("NEGRO" en "Plancha De Pvc 3mm Pvc Negro"). El
+   panel lo puede mandar explícito (matColor/color) o dentro de la etiqueta del material. */
+const MAT_COLOR_WORDS = ["NEGRO", "BLANCO", "GRIS", "PLATA", "ORO", "DORADO", "ROJO", "AZUL", "VERDE", "AMARILLO", "NARANJA", "ROSA", "MORADO", "VIOLETA", "MARRON", "BEIGE", "CREMA", "TRANSPARENTE", "INOX", "COBRE"];
+function orderMatColor(o) {
+  if (!o) return "";
+  const explicit = o.matColor || o.color;
+  if (explicit) return String(explicit).trim().toUpperCase();
+  const lab = String(o.matLabel || "").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const words = lab.split(/[^A-Z]+/).filter(Boolean);
+  for (let i = words.length - 1; i >= 0; i--) if (MAT_COLOR_WORDS.includes(words[i])) return words[i];
+  return "";
+}
+/* v100: título de la placa como lo rotula el taller encima de la plancha: "PVC 3MM NEGRO". */
+function sheetTitleText(matName, thk, matColor) {
+  return [matName, thk ? String(thk).replace(".", ",") + "MM" : "", matColor].filter(Boolean).join(" ").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+}
 /* Color del pedido: se deriva de la REFERENCIA (no del nombre de archivo), así todas las
    piezas del mismo pedido comparten color aunque lleguen en archivos distintos.
    El hash por sí solo COLISIONA (dos pedidos del mismo lote con el mismo color hacen
@@ -8943,7 +9159,7 @@ const extraOrderColor = k => _hslHex(k * 137.508 + 47, k % 2 ? 76 : 60, 30 + k %
 function orderColorMap(pieces) {
   const refs = [];
   (pieces || []).forEach(p => {
-    const r = refOf(p);
+    const r = colorKeyOf(p);
     if (r && refs.indexOf(r) < 0) refs.push(r);
   });
   // Orden estable: el mismo conjunto de pedidos da siempre los mismos colores, así el
@@ -8954,7 +9170,7 @@ function orderColorMap(pieces) {
   return m;
 }
 const orderColorOf = (p, map) => {
-  const r = refOf(p);
+  const r = colorKeyOf(p);
   return (map && map.get(r)) || srcColorFor(r) || srcColorFor(p && p.fileName);
 };
 /* Rótulo de referencia dentro de la pieza: decide el cuerpo de letra (mm) que cabe en el
@@ -9004,7 +9220,9 @@ function tintHex(hex, f) {
    bastante claro para que el corte (color pleno) y las demás capas se lean encima.
    Compartido por el lienzo y el PDF → lo que se ve en pantalla es lo que se imprime. */
 const ORDER_FILL_TINT = 0.55;
-const _ACI_TABLE = [[1, 255, 0, 0], [2, 255, 255, 0], [3, 0, 255, 0], [4, 0, 255, 255], [5, 0, 0, 255], [6, 255, 0, 255], [7, 0, 0, 0], [8, 128, 128, 128], [30, 255, 127, 0], [92, 0, 128, 64], [174, 0, 63, 127], [14, 76, 0, 0]];
+// v100: tabla ACI COMPLETA (1–255). Con 12 entradas casi cualquier color de pedido caía en
+// el mismo índice y en VCarve todos los pedidos salían iguales.
+const _ACI_TABLE = Array.from({ length: 255 }, (_, k) => [k + 1, ...aciRGB(k + 1)]);
 function hexToACI(hex) {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
   if (!m) return 7;
@@ -9569,6 +9787,15 @@ function _parseUnit(str) {
     u: 'px'
   };
 }
+/* v100: la pieza importada se dibuja ajustando su viewBox a w×h ("meet"). El viewBox
+   llevaba 1 unidad de margen por lado (b.x-1 … b.w+2) pero w×h era la caja SIN margen, así
+   que toda la geometría salía ENCOGIDA en el lienzo, en el nesting y en el DXF: una letra de
+   125 mm se cortaba a 123 mm, una "I" de 13×125 a 11,6×108 y un guion de 91,7×3,4 a 57×2,2
+   (el ajuste "meet" usa la escala del lado más corto). Caja exacta en los dos sitios, y w/h
+   redondeados a la micra en vez de a la décima: con el redondeo a 0,1 mm el lado corto de
+   una pieza fina mandaba sobre la escala de la otra y volvía a encoger. */
+const roundMM = v => Math.round(v * 1000) / 1000;
+const exactViewBox = b => b.x + ' ' + b.y + ' ' + b.w + ' ' + b.h;
 function _toMM(v, u) {
   if (u === 'mm') return v;
   if (u === 'cm') return v * 10;
@@ -9778,7 +10005,9 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul, fit) {
       x: m[0] * x + m[2] * y + m[4],
       y: m[1] * x + m[3] * y + m[5]
     });
-    let ctm = vp.transform.slice();
+    // v100: espejo horizontal de la página entera (x → ancho − x) antes de cualquier operador.
+    // Todo punto pasa por ctm, así que piezas, cajas y sondas de contención salen espejadas.
+    let ctm = __NEST_CFG__.mirror ? mul([-1, 0, 0, 1, vp.width, 0], vp.transform) : vp.transform.slice();
     const stack = [];
     const _ocStack = [];
     let curOC = null;
@@ -10041,6 +10270,16 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul, fit) {
         case OPS.transform:
           ctm = mul(ctm, args);
           break;
+        /* v100: pdf.js inserta el contenido de los Form XObject (/Fm0 Do) entre estos dos
+           operadores, con la /Matrix propia del formulario en args[0]. Sin aplicarla, un
+           formulario con matriz no identidad salía desplazado o a otra escala. */
+        case OPS.paintFormXObjectBegin:
+          stack.push(ctm.slice());
+          if (args && args[0] && args[0].length === 6) ctm = mul(ctm, Array.from(args[0]));
+          break;
+        case OPS.paintFormXObjectEnd:
+          if (stack.length) ctm = stack.pop();
+          break;
         case OPS.beginMarkedContentProps:
           _ocStack.push(curOC);
           if (args && args[0] === 'OC' && args[1] && args[1].id) curOC = args[1].id;
@@ -10250,13 +10489,13 @@ async function parsePDFVector(arrayBuffer, userScale, unitMul, fit) {
     return {
       id: 'pdfv-' + Date.now() + '-' + i,
       label: 'PDF ' + (i + 1),
-      w: Math.round(b.w * 10) / 10,
-      h: Math.round(b.h * 10) / 10,
+      w: roundMM(b.w),
+      h: roundMM(b.h),
       svgContent: inner,
       svgRaw: inner,
       capa: pieceCapa,
       layers: pieceLayers,
-      viewBox: b.x - 1 + ' ' + (b.y - 1) + ' ' + (b.w + 2) + ' ' + (b.h + 2),
+      viewBox: exactViewBox(b),
       quantity: 1,
       _svgW: b.w,
       _svgH: b.h
@@ -10405,7 +10644,8 @@ async function parsePDFRaster(arrayBuffer, userScale, unitMul, fit) {
       const dataUrl = crop.toDataURL('image/png');
       const mmW = Math.round(bw * ptToMm * 10) / 10;
       const mmH = Math.round(bh * ptToMm * 10) / 10;
-      const svgImg = '<image href="' + dataUrl + '" x="0" y="0" width="' + bw + '" height="' + bh + '"/>';
+      const svgImg0 = '<image href="' + dataUrl + '" x="0" y="0" width="' + bw + '" height="' + bh + '"/>';
+      const svgImg = __NEST_CFG__.mirror ? '<g transform="matrix(-1 0 0 1 ' + bw + ' 0)">' + svgImg0 + '</g>' : svgImg0; // v100: espejo
       allPieces.push({
         id: 'pdf-' + Date.now() + '-' + pageNum + '-' + i,
         label: 'PDF P' + pageNum + ' #' + (i + 1),
@@ -10637,9 +10877,9 @@ function capaOfParts(capaList) {
 function importedPieceBase(idPrefix, index, bbox, scale) {
   return {
     id: idPrefix + '-' + Date.now() + '-' + index,
-    w: Math.round(bbox.w * scale * 10) / 10,
-    h: Math.round(bbox.h * scale * 10) / 10,
-    viewBox: bbox.x - 1 + ' ' + (bbox.y - 1) + ' ' + (bbox.w + 2) + ' ' + (bbox.h + 2),
+    w: roundMM(bbox.w * scale),
+    h: roundMM(bbox.h * scale),
+    viewBox: exactViewBox(bbox),
     quantity: 1,
     _svgW: bbox.w,
     _svgH: bbox.h
@@ -10664,7 +10904,12 @@ function parseDXF(dxfText, userScale) {
     const inner = g.indices.map(idx => svgParts[idx].svg).join('');
     // El eje Y del DXF crece hacia arriba y el del SVG hacia abajo: se voltea el grupo
     // sobre su propia caja para que el dibujo entre derecho.
-    const flipTransform = 'translate(0,' + (b.y + (-b.y - b.h)) + ') scale(1,-1)';
+    // v100: el volteo trasladaba −h en vez de 2·y+h, así que el dibujo caía FUERA de su
+    // viewBox (pieza invisible y sin contorno) salvo que la caja empezara justo en y = −h.
+    // Ahora es una simetría sobre la propia caja: y → 2·y0 + h − y, y con el espejo
+    // horizontal (v100) además x → 2·x0 + w − x, en una sola matriz.
+    const mx = __NEST_CFG__.mirror ? -1 : 1;
+    const flipTransform = 'matrix(' + mx + ' 0 0 -1 ' + (mx < 0 ? 2 * b.x + b.w : 0) + ' ' + (2 * b.y + b.h) + ')';
     const flipped = '<g transform="' + flipTransform + '">' + inner + '</g>';
     return {
       ...importedPieceBase('dxf', i, b, scale),
@@ -10766,11 +11011,17 @@ function measureElementBBoxes(elements, viewBox, width, height) {
       stage.appendChild(clone);
       return clone;
     }
+    /* v100: getBBox() mide en el espacio PROPIO del elemento, sin su atributo transform: medir
+       el <g transform> daba la caja SIN trasladar/escalar y la pieza quedaba fuera de su
+       viewBox (invisible y sin contorno) en cuanto el SVG agrupaba con transform. Se mide un
+       <g> exterior sin transform, cuyo espacio es el del documento. */
     const wrapper = document.createElementNS(NS, "g");
     wrapper.setAttribute("transform", item.transform);
     wrapper.appendChild(clone);
-    stage.appendChild(wrapper);
-    return wrapper;
+    const outer = document.createElementNS(NS, "g");
+    outer.appendChild(wrapper);
+    stage.appendChild(outer);
+    return outer;
   });
   elements.forEach((item, i) => {
     let measured = null;
@@ -10868,11 +11119,13 @@ function parseSVG(svgText, userScale) {
   const pieces = groups.map((g, i) => {
     const b = g.bbox;
     const parts = g.indices.map(idx => serializeCuttableElement(elements[idx]));
+    // v100: espejo horizontal sobre la propia caja de la pieza (x → 2·x0 + w − x).
+    const mirrorWrap = m => __NEST_CFG__.mirror ? '<g transform="matrix(-1 0 0 1 ' + (2 * b.x + b.w) + ' 0)">' + m + '</g>' : m;
     return {
       ...importedPieceBase('svg', i, b, scale),
       label: 'Pieza ' + (i + 1),
-      svgContent: parts.map(p => p.clean).join(''),
-      svgRaw: parts.map(p => p.raw).join(''),
+      svgContent: mirrorWrap(parts.map(p => p.clean).join('')),
+      svgRaw: mirrorWrap(parts.map(p => p.raw).join('')),
       capa: capaOfParts(parts.map(p => p.capa)),
       layers: [...new Set(g.indices.map(idx => elements[idx].layer).filter(Boolean))] // demo-11: capas reales presentes
     };
@@ -11826,103 +12079,503 @@ async function nestPiecesNFP(pieces, W, H, gap, onProgress) {
     return nestPieces(pieces, W, H, gap, onProgress);
   }
 }
-/* ── v82: Nesting agrupado por pedido ──────────────────────────────────────────
-   Cada pedido (fileName) se anida en su propia BANDA vertical, en orden de carga;
-   la banda siguiente empieza en maxX+gap de la anterior (separable con guillotina).
-   Si el resto de placa no admite más piezas del grupo, el grupo continúa en placa
-   nueva. Reutiliza el motor por sub-rect (avail×H), mismo patrón que los retales
-   por bin; identidad por __rk (sello previo) que el motor propaga vía {...src}.
-   Sin identidad → null y el caller cae a nesting normal (a prueba de duplicados).
-   Coste asumido: −aprovechamiento (un pedido ya no rellena huecos de otro) a
-   cambio de recogida por pedido sin clasificar piezas. */
-async function nestGroupedByOrder(srcList, plateW, plateH, gap, onProgress) {
-  const engine = chooseNest();
-  const orderKeys = [];
-  const groupsMap = {};
-  srcList.forEach((p, i) => {
-    const k = p.fileName || '(manual)';
-    if (!groupsMap[k]) { groupsMap[k] = []; orderKeys.push(k); }
-    groupsMap[k].push({ ...p, __rk: i, quantity: p.quantity || 1 });
-  });
-  const totalQ = srcList.reduce((s, p) => s + (p.quantity || 1), 0);
-  let doneQ = 0;
-  const sheets = [];
-  let cur = null, frontier = 0;
-  const openSheet = () => { cur = { grid: null, pieces: [], _orderBands: [] }; sheets.push(cur); frontier = 0; };
-  const oversized = [];
-  for (let gi = 0; gi < orderKeys.length; gi++) {
-    if (typeof window !== 'undefined' && window.__NEST_CANCEL__ === true) return null; // v87: cancelado → caller aborta
-    const gName = orderKeys[gi];
-    let remaining = groupsMap[gName];
-    let guard = 0;
-    while (remaining.length && guard++ < 64) {
-      if (!cur) openSheet();
-      const avail = plateW - frontier;
-      /* Ancho mínimo para poder colocar TODAS las restantes: el lado menor MÁXIMO del
-         grupo (cada pieza puede rotar 90). Usar el mínimo dejaría piezas anchas sin
-         colocar y sin reporte. */
-      let maxMinSide = 0;
-      for (const p of remaining) { const sd = Math.min(p.w || 0, p.h || 0); if (sd > maxMinSide) maxMinSide = sd; }
-      if (!(maxMinSide > 0)) maxMinSide = 30;
-      if (avail < maxMinSide + gap) { cur = null; continue; } // banda agotada → placa nueva
-      /* v82: ancho de banda PRESUPUESTADO por área (+25% de holgura para irregulares),
-         no el ancho libre entero: el coste BLF del motor llena la primera fila a lo
-         ancho, y con avail completo cada pedido devoraría la placa. Si el presupuesto
-         se queda corto, la pasada siguiente añade banda CONTIGUA del mismo pedido
-         (se fusiona en _orderBands). */
-      const remArea = remaining.reduce((sa, p) => sa + (p.w || 0) * (p.h || 0) * (p.quantity || 1), 0);
-      let bandW = Math.ceil(remArea * 1.25 / Math.max(1, plateH)) + gap;
-      bandW = Math.max(bandW, maxMinSide + gap);
-      bandW = Math.min(bandW, avail);
-      const subQ = remaining.reduce((sq, p) => sq + (p.quantity || 1), 0);
-      const prog = onProgress ? (ph, d, t) => {
-        if (ph === 'place') onProgress('place', Math.min(totalQ, doneQ + (t ? Math.round(subQ * d / t) : 0)), totalQ);
-      } : null;
-      let r = null;
-      try { r = await engine(remaining, bandW, plateH, gap, prog); } catch (e) { r = null; }
-      const sheet0 = r && r.length ? r[0] : null;
-      if (!sheet0 || !sheet0.pieces || !sheet0.pieces.length) {
-        if (frontier === 0) break; // ni en placa vacía entra nada → lo reporta el contador final (sin duplicar)
-        cur = null; continue; // reintento en placa nueva
-      }
-      if (sheet0.pieces.some(pp => pp.__rk === undefined)) return null; // identidad no propagada
-      let maxX = frontier;
-      for (const pp of sheet0.pieces) {
-        pp.x += frontier;
-        if (pp.x + pp.placedW > maxX) maxX = pp.x + pp.placedW;
-        cur.pieces.push(pp);
-      }
-      const bands = cur._orderBands, last = bands[bands.length - 1];
-      if (last && last.label === gName) last.x1 = Math.min(plateW, maxX);
-      else bands.push({ label: gName, x0: frontier, x1: Math.min(plateW, maxX) });
-      const used = {};
-      sheet0.pieces.forEach(pp => { used[pp.__rk] = (used[pp.__rk] || 0) + 1; doneQ++; });
-      remaining = remaining
-        .map(p => ({ ...p, quantity: (p.quantity || 1) - (used[p.__rk] || 0) }))
-        .filter(p => p.quantity > 0);
-      frontier = maxX + gap; // si queda grupo, la siguiente pasada intenta banda contigua en esta misma placa
+/* ══ v100 · NESTING POR BLOQUES DE PEDIDO (maquetación tipo VCarve) ═══════════════════
+   Así maqueta el taller la placa a mano en VCarve: cada pedido en su BLOQUE compacto, las
+   letras de un pedido juntas, y su referencia rotulada fuera de la placa junto al bloque.
+   El fresador recoge pedido a pedido sin clasificar letras sueltas.
+
+   Motor RASTER de forma real (no por caja envolvente):
+     1. Cada pieza se rasteriza UNA vez a 0° sobre una rejilla de R mm, inflada gap/2 más
+        media diagonal de celda: una celda se marca si su centro cae dentro del contorno
+        inflado. Así toda celda que el contorno inflado gap/2 toque queda marcada, y dos
+        piezas con celdas disjuntas quedan SIEMPRE a ≥ gap (garantía, no estimación).
+     2. 90/180/270° se obtienen GIRANDO LAS CELDAS, no re-rasterizando: el giro de un bloque
+        entero es entonces exacto en celdas y no puede crear solapes.
+     3. Cada pedido se empaqueta (arriba-izquierda, forma real) en una franja; se prueban
+        varios anchos y se queda el bloque más compacto.
+     4. Los bloques se colocan en la placa como su RECTÁNGULO (un pedido no se mete entre las
+        letras de otro), con el mismo criterio, en 4 giros, probando varios órdenes y
+        quedándose el que gasta menos placa. Al estamparlos se dilatan OB_ORDER_GAP_MM: entre
+        pedidos queda más aire que entre letras del mismo pedido.
+     5. Red final con la geometría REAL de cada pieza (obFindOverlap): si algo se pisara, el
+        lote cae al nesting normal en vez de mandar un solape a la fresadora.
+   Un pedido que no cabe entero en la placa libre pasa a placa nueva; si no cabe ni en una
+   placa vacía se reparte por placas (bloques de continuación). */
+const OB_ORDER_GAP_MM = 12;
+const OB_ROTATE_BIAS_MM = 15; // lo que tiene que subir una pieza girada para preferirla a derechas
+const OB_BLOCK_ROTATE_BIAS_MM = 150; // ídem para girar un bloque entero (todas sus letras)
+const OB_ROTS = [0, 90, 180, 270];
+/* mm por celda: ~700k celdas por placa (2000×3000 → 2,9 mm). Más fino = más denso y lento. */
+function obResolution(W, H) {
+  return Math.min(5, Math.max(1.5, Math.sqrt(W * H / 700000)));
+}
+/* Spans por fila [a0,b0,a1,b1…] (inclusivos) y longitud del span más largo de cada fila. */
+function obMaskFromBits(bits, w, h) {
+  const rows = new Array(h), maxLen = new Int32Array(h);
+  let area = 0;
+  for (let j = 0; j < h; j++) {
+    const sp = [];
+    let i = 0;
+    const o = j * w;
+    while (i < w) {
+      if (!bits[o + i]) { i++; continue; }
+      const a = i;
+      while (i < w && bits[o + i]) i++;
+      sp.push(a, i - 1);
+      area += i - a;
+      if (i - a > maxLen[j]) maxLen[j] = i - a;
     }
-    if (remaining.length) // guard agotado o break: nada silencioso
-      oversized.push(gName + ': ' + remaining.reduce((sq, p) => sq + (p.quantity || 1), 0) + ' pieza(s) sin colocar');
+    rows[j] = sp;
   }
-  if (onProgress) onProgress('place', totalQ, totalQ);
-  /* v83 FIX solape intermitente: red de seguridad anti-solape sobre la placa COMBINADA
-     (multi-banda). El motor valida overlap SOLO dentro de cada banda; al ensamblar bandas
-     con pp.x += frontier NINGÚN guard revisaba el conjunto montado (era la única ruta de
-     nesting sin la red final _sheetsArtworkOverlap). Si el arte real solapa >2mm² en la
-     placa ya montada → ABORTA a nesting normal (que tiene sus propias redes _shelfPack/
-     _skyline y no deja solapar). Correcto sea cual sea el origen geométrico del solape:
-     valida EXACTAMENTE lo que se renderiza (misma ruta bakedPathD con p.x/placedW/drawW/
-     rotation). Se sacrifica el agrupado SOLO cuando evitaría mostrar un solape — la
-     corrección manda sobre el agrupado. */
-  if (_sheetsArtworkOverlap(sheets)) {
-    try { console.warn('[Rotula] agrupado por pedidos produjo solape en placa combinada → nesting normal'); } catch (e) {}
+  return { w, h, bits, rows, maxLen, area };
+}
+/* Giro horario de 90° de las celdas: (i, j) → (h−1−j, i). */
+function obRotCW(m) {
+  const w2 = m.h, h2 = m.w, nb = new Uint8Array(w2 * h2);
+  for (let j = 0; j < m.h; j++) for (let i = 0; i < m.w; i++) if (m.bits[j * m.w + i]) nb[i * w2 + (m.h - 1 - j)] = 1;
+  return obMaskFromBits(nb, w2, h2);
+}
+/* Dilatación cuadrada de k celdas (para separar bloques de pedidos distintos). */
+function obDilate(m, k) {
+  if (!(k > 0)) return { mask: m, k: 0 };
+  const w = m.w + 2 * k, h = m.h + 2 * k;
+  const hb = new Uint8Array(w * h);
+  for (let j = 0; j < m.h; j++) {
+    const sp = m.rows[j], o = (j + k) * w;
+    for (let s = 0; s < sp.length; s += 2) for (let i = sp[s]; i <= sp[s + 1] + 2 * k; i++) hb[o + i] = 1;
+  }
+  const vb = new Uint8Array(w * h);
+  for (let i = 0; i < w; i++) {
+    let last = -1e9; // última fila marcada vista (pasada descendente + ascendente)
+    for (let j = 0; j < h; j++) { if (hb[j * w + i]) last = j; if (j - last <= k) vb[j * w + i] = 1; }
+    last = 1e9;
+    for (let j = h - 1; j >= 0; j--) { if (hb[j * w + i]) last = j; if (last - j <= k) vb[j * w + i] = 1; }
+  }
+  return { mask: obMaskFromBits(vb, w, h), k };
+}
+/* Rasteriza (relleno par-impar, cada polígono por separado → macizo) sobre centros de celda. */
+function obRasterize(polys, w, h, R) {
+  const bits = new Uint8Array(w * h);
+  for (const poly of polys) {
+    const n = poly.length;
+    if (n < 3) continue;
+    let y0 = Infinity, y1 = -Infinity;
+    for (const p of poly) { if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y; }
+    const j0 = Math.max(0, Math.ceil(y0 / R - 0.5)), j1 = Math.min(h - 1, Math.floor(y1 / R - 0.5));
+    const xs = [];
+    for (let j = j0; j <= j1; j++) {
+      const yc = (j + 0.5) * R;
+      xs.length = 0;
+      for (let a = 0, b = n - 1; a < n; b = a++) {
+        const pa = poly[a], pb = poly[b];
+        if ((pa.y > yc) !== (pb.y > yc)) xs.push(pa.x + (yc - pa.y) * (pb.x - pa.x) / (pb.y - pa.y));
+      }
+      xs.sort((u, v) => u - v);
+      for (let q = 0; q + 1 < xs.length; q += 2) {
+        const i0 = Math.max(0, Math.ceil(xs[q] / R - 0.5)), i1 = Math.min(w - 1, Math.floor(xs[q + 1] / R - 0.5));
+        for (let i = i0; i <= i1; i++) bits[j * w + i] = 1;
+      }
+    }
+  }
+  return bits;
+}
+/* Silueta de nesting de una pieza a 0° en su caja local [0,w]×[0,h]: los anillos cerrados
+   se unen MACIZOS (los huecos de una "O" no se usan: ninguna pieza va dentro de otra) y las
+   líneas abiertas (hendidos) cuentan con su trazo. Inflado `inflate` mm. Devuelve polígonos
+   en mm desplazados `pad` (marco de la máscara). */
+function obInflatedOutline(polylines, w, h, inflate, pad) {
+  const CL = ClipperLib, S = 100;
+  const closed = [], open = [];
+  for (const pl of polylines || []) {
+    if (!pl || pl.length < 2) continue;
+    const path = pl.map(p => ({ X: Math.round(p.x * S), Y: Math.round(p.y * S) }));
+    if (isClosedPts(pl) && pl.length >= 4) {
+      if (!CL.Clipper.Orientation(path)) path.reverse();
+      closed.push(path);
+    } else open.push(path);
+  }
+  const rect = [{ X: 0, Y: 0 }, { X: Math.round(w * S), Y: 0 }, { X: Math.round(w * S), Y: Math.round(h * S) }, { X: 0, Y: Math.round(h * S) }];
+  if (!closed.length && !open.length) closed.push(rect);
+  /* Huella = anillos macizos ∪ los contornos DEGENERADOS como trazo. Un contorno "cerrado"
+     de ida y vuelta (una línea de grosor cero, como los trazos sin expandir de Illustrator)
+     tiene área 0: la unión maciza lo hace desaparecer y la pieza quedaba sin máscara —el
+     motor la colocaba ENCIMA de otra—. Se tratan como trazo los anillos cuya anchura media
+     (área/perímetro) no llega a 0,5 mm; los demás ya quedan cubiertos por su relleno. */
+  const thin = closed.filter(path => {
+    let a = 0, per = 0;
+    for (let i = 0, n = path.length, j = n - 1; i < n; j = i++) {
+      a += path[j].X * path[i].Y - path[i].X * path[j].Y;
+      per += Math.hypot(path[i].X - path[j].X, path[i].Y - path[j].Y);
+    }
+    return Math.abs(a) / 2 < per * 0.5 * S;
+  });
+  const footprint = d => {
+    let solid = closed;
+    if (closed.length) {
+      const c = new CL.Clipper();
+      c.AddPaths(closed, CL.PolyType.ptSubject, true);
+      solid = new CL.Paths();
+      c.Execute(CL.ClipType.ctUnion, solid, CL.PolyFillType.pftNonZero, CL.PolyFillType.pftNonZero);
+    }
+    const co = new CL.ClipperOffset(2, 0.1 * S);
+    if (solid.length) co.AddPaths(solid, CL.JoinType.jtRound, CL.EndType.etClosedPolygon);
+    const lines = open.concat(thin);
+    if (lines.length) co.AddPaths(lines, CL.JoinType.jtRound, CL.EndType.etOpenRound);
+    const out = new CL.Paths();
+    co.Execute(out, d * S);
+    return out.length ? out : [rect];
+  };
+  const toMM = (paths, k) => paths.map(path => path.map(p => ({ x: p.X / S + k, y: p.Y / S + k })));
+  return { polys: toMM(footprint(inflate), pad), solid: toMM(footprint(0.02), 0) };
+}
+/* Las cuatro orientaciones de una pieza. off[r] = esquina de la caja girada de la pieza
+   dentro del marco girado de su máscara (mm): es lo que convierte celda → posición. */
+function obPieceType(piece, R, gap) {
+  const w = +piece.w || 0, h = +piece.h || 0;
+  if (!(w > 0 && h > 0)) return null;
+  // aplanado puro JS (rápido, flecha ≤ 0,05 mm); el muestreo por DOM queda de respaldo
+  let polylines = null;
+  try { polylines = window.pieceOutlineMM && window.pieceOutlineMM.shapes ? window.pieceOutlineMM.shapes(piece, 0.05) : null; } catch (e) { polylines = null; }
+  if (!polylines || !polylines.length) {
+    try {
+      polylines = pieceToPolylinesMM({ ...piece, x: 0, y: 0, placedW: w, placedH: h, drawW: w, drawH: h, rotated: false, rotation: 0 }).polylines || [];
+    } catch (e) { polylines = []; }
+  }
+  // gap/2 + media diagonal de celda (cobertura conservadora) + flecha de los arcos del offset
+  const d = Math.max(0, gap) / 2 + R * Math.SQRT1_2 + 0.15;
+  const mw = Math.max(1, Math.ceil((w + 2 * d) / R)), mh = Math.max(1, Math.ceil((h + 2 * d) / R));
+  const outl = obInflatedOutline(polylines, w, h, d, d);
+  let m0 = obMaskFromBits(obRasterize(outl.polys, mw, mh, R), mw, mh);
+  if (!m0.area) m0 = obRectMask(mw, mh); // sin huella rasterizable: la caja entera, nunca nada
+  const masks = [m0];
+  for (let k = 1; k < 4; k++) masks.push(obRotCW(masks[k - 1]));
+  const Fw = mw * R, Fh = mh * R;
+  const off = [{ x: d, y: d }, { x: Fh - d - h, y: d }, { x: Fw - d - w, y: Fh - d - h }, { x: d, y: Fw - d - w }];
+  return { piece, w, h, masks, off, solid: outl.solid };
+}
+/* Silueta maciza de la pieza ya colocada (giro q·90° horario y caja girada en x,y), en mm. */
+function obPlacedSolid(T, q, x, y) {
+  const { w, h } = T;
+  const f = q === 1 ? (p => ({ X: x + h - p.y, Y: y + p.x })) : q === 2 ? (p => ({ X: x + w - p.x, Y: y + h - p.y })) : q === 3 ? (p => ({ X: x + p.y, Y: y + w - p.x })) : (p => ({ X: x + p.x, Y: y + p.y }));
+  return T.solid.map(path => path.map(f));
+}
+/* Comprobación final con la geometría REAL de cada pieza (todas sus formas: path, polygon,
+   rect, circle…), no con el rectángulo de respaldo que usa _sheetsArtworkOverlap para lo que
+   no es <path>: con ese respaldo, una pieza encajada en la esquina vacía de un triángulo o de
+   un rombo SVG contaba como solape y el anidado por bloques se descartaba entero. Devuelve el
+   primer par que se pisa más de 1 mm², o null. */
+function obFindOverlap(placed) {
+  const CL = ClipperLib, S = 100;
+  const items = placed.map(e => {
+    const paths = e.solid.map(path => path.map(p => ({ X: Math.round(p.X * S), Y: Math.round(p.Y * S) })));
+    let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
+    paths.forEach(path => path.forEach(p => { if (p.X < a) a = p.X; if (p.Y < b) b = p.Y; if (p.X > c) c = p.X; if (p.Y > d) d = p.Y; }));
+    return { e, paths, a, b, c, d };
+  }).filter(it => it.paths.length);
+  items.sort((u, v) => u.a - v.a);
+  for (let i = 0; i < items.length; i++) {
+    const A = items[i];
+    for (let j = i + 1; j < items.length && items[j].a < A.c; j++) {
+      const B = items[j];
+      if (B.b >= A.d || A.b >= B.d) continue;
+      const c = new CL.Clipper();
+      c.AddPaths(A.paths, CL.PolyType.ptSubject, true);
+      c.AddPaths(B.paths, CL.PolyType.ptClip, true);
+      const out = new CL.Paths();
+      c.Execute(CL.ClipType.ctIntersection, out, CL.PolyFillType.pftNonZero, CL.PolyFillType.pftNonZero);
+      let area = 0;
+      out.forEach(pp => area += Math.abs(CL.Clipper.Area(pp)));
+      if (area > 1 * S * S) return [A.e.label, B.e.label];
+    }
+  }
+  return null;
+}
+/* Rejilla de ocupación con "carreras libres": run[c] = celdas libres seguidas desde c hacia
+   la derecha. Probar un span cuesta una lectura, y si falla dice cuánto saltar. */
+function obGrid(gw, gh) {
+  const run = new Int32Array(gw * gh), occ = new Uint8Array(gw * gh), rowMax = new Int32Array(gh);
+  for (let y = 0; y < gh; y++) { for (let x = 0; x < gw; x++) run[y * gw + x] = gw - x; rowMax[y] = gw; }
+  const fixRow = y => {
+    let r = 0, mx = 0;
+    for (let x = gw - 1; x >= 0; x--) {
+      r = occ[y * gw + x] ? 0 : r + 1;
+      run[y * gw + x] = r;
+      if (r > mx) mx = r;
+    }
+    rowMax[y] = mx;
+  };
+  // -1 si cabe en (x,y); si no, la siguiente x que merece la pena probar
+  const test = (m, x, y) => {
+    for (let r = 0; r < m.h; r++) {
+      const sp = m.rows[r];
+      if (!sp.length) continue;
+      const base = (y + r) * gw + x;
+      for (let s = 0; s < sp.length; s += 2) {
+        const k = run[base + sp[s]];
+        if (k < sp[s + 1] - sp[s] + 1) return x + k + 1;
+      }
+    }
+    return -1;
+  };
+  // primera posición arriba-izquierda (y mínima, luego x mínima) con y ≤ maxY
+  const find = (m, maxY) => {
+    if (m.w > gw || m.h > gh) return null;
+    const yEnd = Math.min(gh - m.h, maxY == null ? Infinity : maxY), xMax = gw - m.w;
+    for (let y = 0; y <= yEnd; y++) {
+      let ok = true;
+      for (let r = 0; r < m.h; r++) if (m.maxLen[r] > rowMax[y + r]) { ok = false; break; }
+      if (!ok) continue;
+      let x = 0;
+      while (x <= xMax) {
+        const nx = test(m, x, y);
+        if (nx < 0) return { x, y };
+        x = nx;
+      }
+    }
     return null;
+  };
+  // estampa recortando a la rejilla (la dilatación entre pedidos puede asomar por el borde)
+  const stamp = (m, x, y) => {
+    for (let r = 0; r < m.h; r++) {
+      const yy = y + r;
+      if (yy < 0 || yy >= gh) continue;
+      const sp = m.rows[r];
+      if (!sp.length) continue;
+      for (let s = 0; s < sp.length; s += 2) {
+        const a = Math.max(0, x + sp[s]), b = Math.min(gw - 1, x + sp[s + 1]);
+        for (let i = a; i <= b; i++) occ[yy * gw + i] = 1;
+      }
+      fixRow(yy);
+    }
+  };
+  return { gw, gh, find, stamp };
+}
+/* Mejor colocación de una máscara entre sus giros: la más arriba y, a igualdad, la más a
+   la izquierda (abajo-izquierda clásico, con la gravedad hacia el borde superior de la
+   placa). Un giro distinto del original solo gana si sube al menos `bias` celdas: las letras
+   quedan DERECHAS salvo que girarlas aproveche un hueco de verdad, como en la maqueta a mano
+   (ordenar por "borde inferior" las tumbaba todas). */
+function obBestFit(grid, masks, rots, bias) {
+  let best = null;
+  const pen = q => q ? bias || 0 : 0;
+  for (const q of rots) {
+    const m = masks[q];
+    if (!m) continue;
+    const pos = grid.find(m, best ? best.score - pen(q) : null);
+    if (!pos) continue;
+    const score = pos.y + pen(q);
+    if (!best || score < best.score || score === best.score && pos.x < best.x) best = { q, x: pos.x, y: pos.y, score };
   }
-  sheets._engine = true;
-  sheets._grouped = true;
-  if (oversized.length) sheets._oversized = oversized;
-  return sheets;
+  return best;
+}
+/* Empaqueta las instancias de un pedido en una franja gw×gh. */
+function obPackOrder(insts, types, gw, gh, bias) {
+  const grid = obGrid(gw, gh);
+  const placements = [], left = [];
+  let usedW = 0, usedH = 0;
+  for (const inst of insts) {
+    const T = types[inst.t];
+    const best = obBestFit(grid, T.masks, [0, 2, 1, 3], bias);
+    if (!best) { left.push(inst); continue; }
+    const m = T.masks[best.q];
+    grid.stamp(m, best.x, best.y);
+    placements.push({ inst, t: inst.t, q: best.q, gx: best.x, gy: best.y });
+    usedW = Math.max(usedW, best.x + m.w);
+    usedH = Math.max(usedH, best.y + m.h);
+  }
+  return { placements, left, usedW, usedH };
+}
+/* Bloques candidatos de un pedido: se empaqueta en franjas de varios anchos y cada franja
+   que lo admite entero da un candidato, ordenados de más a menos compacto (área de la caja,
+   con castigo suave a los bloques muy alargados y a las letras giradas). La placa prueba
+   los candidatos por ese orden: si el más compacto no cabe en el hueco libre, quizá uno
+   más estrecho o más bajo sí, antes de abrir placa nueva. Si el pedido no cabe entero ni a
+   ancho de placa, devuelve el trozo que cabe y el resto (continuación en otra placa). */
+function obFormBlock(insts, types, gw, gh, quick, bias) {
+  let area = 0, minSide = 1;
+  for (const inst of insts) {
+    const m = types[inst.t].masks[0];
+    area += m.area;
+    minSide = Math.max(minSide, Math.min(m.w, m.h));
+  }
+  const side = Math.sqrt(area / 0.55);
+  const widths = new Set([gw]);
+  if (!quick) for (const f of [0.5, 0.75, 1, 1.35, 1.9, 2.6]) widths.add(Math.max(minSide, Math.min(gw, Math.round(side * f))));
+  const cands = [];
+  let full = null;
+  for (const cw of [...widths].sort((a, b) => a - b)) {
+    const res = obPackOrder(insts, types, cw, gh, bias);
+    if (cw === gw) full = res;
+    if (res.left.length || !res.placements.length) continue;
+    // piezas giradas (ponderadas por superficie) también puntúan en contra: entre dos
+    // bloques casi igual de compactos gana el de letras derechas
+    let rotA = 0, allA = 0;
+    for (const pl of res.placements) { const a = types[pl.t].masks[0].area; allA += a; if (pl.q) rotA += a; }
+    const score = res.usedW * res.usedH * (1 + 0.12 * Math.abs(Math.log(res.usedW / Math.max(1, res.usedH)))) * (1 + 0.35 * rotA / Math.max(1, allA));
+    if (cands.some(c => c.w === res.usedW && c.h === res.usedH)) continue; // mismo bloque otra vez
+    cands.push({ placements: res.placements, w: res.usedW, h: res.usedH, score });
+  }
+  cands.sort((a, b) => a.score - b.score);
+  /* En la placa el bloque cuenta como su RECTÁNGULO, no como su silueta: con siluetas los
+     pedidos se encajaban unos en los huecos de otros y ya no se distinguía dónde acaba uno
+     y empieza el siguiente (ni se podía seleccionar un pedido con una ventana en VCarve). */
+  if (cands.length) return { cands, left: [] };
+  if (!full || !full.placements.length) return { cands: [], left: insts };
+  return { cands: [{ placements: full.placements, w: full.usedW, h: full.usedH, score: 0 }], left: full.left };
+}
+const obRectMask = (w, h) => obMaskFromBits(new Uint8Array(w * h).fill(1), w, h);
+/* Coloca las piezas del bloque girado q·90° (en celdas, exacto): posición de su máscara
+   dentro del bloque girado y giro final de la pieza. */
+function obRotatePlacement(pl, types, bw, bh, q) {
+  const m = types[pl.t].masks[pl.q];
+  let gx = pl.gx, gy = pl.gy;
+  if (q === 1) { gx = bh - pl.gy - m.h; gy = pl.gx; }
+  else if (q === 2) { gx = bw - pl.gx - m.w; gy = bh - pl.gy - m.h; }
+  else if (q === 3) { gx = pl.gy; gy = bw - pl.gx - m.w; }
+  return { t: pl.t, inst: pl.inst, q: (pl.q + q) % 4, gx, gy };
+}
+async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
+  if (!clipperOK() || !(W > 0 && H > 0)) return null;
+  const cancelled = () => typeof window !== 'undefined' && window.__NEST_CANCEL__ === true;
+  const R = obResolution(W, H);
+  const gw = Math.floor(W / R), gh = Math.floor(H / R);
+  const types = [], oversized = [];
+  let lastYield = Date.now();
+  const breathe = async () => {
+    if (Date.now() - lastYield > 60) { await new Promise(r => setTimeout(r, 0)); lastYield = Date.now(); }
+    if (cancelled()) throw new Error('__NEST_CANCELLED__');
+  };
+  // ── 1. máscaras por tipo de pieza ──
+  const totalQ = srcList.reduce((s, p) => s + Math.max(1, p.quantity || 1), 0);
+  for (let i = 0; i < srcList.length; i++) {
+    if (onProgress) onProgress('masks', i, srcList.length);
+    const T = obPieceType(srcList[i], R, gap);
+    if (T && !T.masks.some(m => m.w <= gw && m.h <= gh)) {
+      oversized.push((srcList[i].label || 'pieza') + ' (' + Math.round(T.w) + '×' + Math.round(T.h) + ' mm)');
+      types.push(null);
+    } else types.push(T);
+    await breathe();
+  }
+  // ── 2. instancias por pedido, en orden de primera aparición ──
+  const orderKeys = [], byOrder = new Map();
+  srcList.forEach((p, t) => {
+    if (!types[t]) return;
+    const key = orderKeyOf(p) || '(sin pedido)';
+    if (!byOrder.has(key)) { byOrder.set(key, []); orderKeys.push(key); }
+    const n = Math.max(1, Math.round(p.quantity || 1));
+    for (let c = 0; c < n; c++) byOrder.get(key).push({ t, c });
+  });
+  const areaOf = inst => types[inst.t].w * types[inst.t].h;
+  const pieceBias = Math.ceil(OB_ROTATE_BIAS_MM / R), blockBias = Math.ceil(OB_BLOCK_ROTATE_BIAS_MM / R);
+  // ── 3. bloques candidatos de cada pedido (con continuaciones si no cabe en una placa) ──
+  const blocks = [];
+  const quick = orderKeys.length === 1; // un solo pedido: su bloque ES la placa
+  let doneQ = 0;
+  for (const key of orderKeys) {
+    let insts = byOrder.get(key).slice().sort((a, b) => areaOf(b) - areaOf(a) || a.t - b.t || a.c - b.c);
+    let guard = 0;
+    while (insts.length && guard++ < 64) {
+      const { cands, left } = obFormBlock(insts, types, gw, gh, quick || insts.length > 150, pieceBias);
+      if (!cands.length) { oversized.push(key + ': ' + insts.length + ' pieza(s) sin colocar'); break; }
+      blocks.push({ key, cands });
+      doneQ += cands[0].placements.length;
+      if (onProgress) onProgress('place', Math.round(doneQ * 0.6), totalQ);
+      insts = left;
+      await breathe();
+    }
+  }
+  // ── 4. bloques en placas: cada uno con sus candidatos y 4 giros ──
+  const kGap = Math.max(0, Math.round(OB_ORDER_GAP_MM / R));
+  const masksOf = c => {
+    if (!c.masks) {
+      c.masks = [obRectMask(c.w, c.h)];
+      for (let k = 1; k < 4; k++) c.masks.push(obRotCW(c.masks[k - 1]));
+    }
+    return c.masks;
+  };
+  /* Reparto de los bloques en placas en un orden dado. Barato (rectángulos), así que se
+     prueban varios órdenes y se queda el que gasta menos placas y, a igualdad, deja más
+     libre la última (lo que sobra es un retal aprovechable). */
+  const assemble = list => {
+    const shs = [], miss = [];
+    for (const bl of list) {
+      let got = null, target = null;
+      const tryPlace = sh => {
+        for (const c of bl.cands) {
+          const fit = obBestFit(sh.grid, masksOf(c), [0, 2, 1, 3], blockBias);
+          if (fit) return { c, fit };
+        }
+        return null;
+      };
+      for (const sh of shs) { got = tryPlace(sh); if (got) { target = sh; break; } }
+      if (!target) {
+        target = { grid: obGrid(gw, gh), items: [], usedH: 0 };
+        got = tryPlace(target);
+        if (!got) { miss.push(bl.key + ': bloque mayor que la placa'); continue; }
+        shs.push(target);
+      }
+      const dil = obDilate(got.c.masks[got.fit.q], kGap);
+      target.grid.stamp(dil.mask, got.fit.x - dil.k, got.fit.y - dil.k);
+      target.items.push({ bl, c: got.c, fit: got.fit });
+      target.usedH = Math.max(target.usedH, got.fit.y + got.c.masks[got.fit.q].h);
+    }
+    return { shs, miss, score: shs.length * 1e7 + (shs.length ? shs[shs.length - 1].usedH : 0) };
+  };
+  const bArea = bl => bl.cands[0].w * bl.cands[0].h;
+  const orders = [
+    blocks.slice().sort((a, b) => bArea(b) - bArea(a)),
+    blocks.slice().sort((a, b) => Math.max(b.cands[0].w, b.cands[0].h) - Math.max(a.cands[0].w, a.cands[0].h)),
+    blocks.slice().sort((a, b) => b.cands[0].h - a.cands[0].h || bArea(b) - bArea(a)),
+    blocks.slice().sort((a, b) => b.cands[0].w - a.cands[0].w || bArea(b) - bArea(a))
+  ];
+  let bestAsm = null;
+  for (const list of orders) {
+    const asm = assemble(list);
+    if (!bestAsm || asm.miss.length < bestAsm.miss.length || asm.miss.length === bestAsm.miss.length && asm.score < bestAsm.score) bestAsm = asm;
+    await breathe();
+  }
+  oversized.push(...bestAsm.miss);
+  const sheets = [];
+  for (const sh of bestAsm.shs) {
+    const target = { pieces: [], blocks: [], check: [] };
+    for (const { bl, c, fit } of sh.items) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const pl0 of c.placements) {
+        const pl = obRotatePlacement(pl0, types, c.w, c.h, fit.q);
+        const T = types[pl.t], src = T.piece, rot = pl.q * 90;
+        const pw = pl.q % 2 ? T.h : T.w, ph = pl.q % 2 ? T.w : T.h;
+        const x = (fit.x + pl.gx) * R + T.off[pl.q].x, y = (fit.y + pl.gy) * R + T.off[pl.q].y;
+        x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + pw); y1 = Math.max(y1, y + ph);
+        target.pieces.push({
+          ...src,
+          x, y,
+          placedW: pw, placedH: ph, drawW: pw, drawH: ph,
+          gridW: Math.max(1, Math.ceil(pw / GRID_CELL)), gridH: Math.max(1, Math.ceil(ph / GRID_CELL)),
+          rotated: rot !== 0, rotation: rot,
+          instanceId: (src.id != null ? src.id : 'p' + pl.t) + '-q' + pl.inst.c
+        });
+        target.check.push({ label: src.label, solid: obPlacedSolid(T, pl.q, x, y) });
+      }
+      target.blocks.push({ key: bl.key, x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+    }
+    // red final con la geometría real: un solape aquí sería un fallo del motor → nesting normal
+    const clash = obFindOverlap(target.check);
+    if (clash) throw new Error('solape entre ' + clash.join(' y '));
+    delete target.check;
+    sheets.push(target);
+    await breathe();
+  }
+  const out = sheets.map(sh => {
+    const s = { grid: null, pieces: sh.pieces };
+    s._orderBlocks = sh.blocks;
+    return s;
+  });
+  if (onProgress) onProgress('place', totalQ, totalQ);
+  out._engine = true;
+  out._grouped = true;
+  out._res = R;
+  if (oversized.length) out._oversized = oversized;
+  return out;
 }
 
 /* ── Retales (recortes en stock) ───────────────────────────────────────────────
@@ -11941,20 +12594,22 @@ async function nestWithRetales(srcList, plateW, plateH, gap, onProgress, retales
   const engine = chooseNest();
   const nfpActive = typeof window !== 'undefined' && !!window.RotulaNFP &&
     (typeof clipperOK === 'function' ? clipperOK() : true);
-  // v82: agrupar por pedido (archivo) — cada pedido en su banda, en orden de carga.
-  if (__NEST_CFG__.groupOrders && __NEST_CFG__.nfp) {
-    const _names = new Set(srcList.map(p => p.fileName || ''));
-    if (_names.size > 1) {
-      if (!nfpActive) {
-        try { console.warn('[Rotula] "Agrupar pedidos" requiere el motor NFP listo → nesting normal'); } catch (e) {}
-      } else {
-        if (retales && retales.length)
-          try { console.warn('[Rotula] "Agrupar pedidos" activo → se ignoran ' + retales.length + ' retal(es) en este nesting (un retal trocearía los pedidos)'); } catch (e) {}
-        const g = await nestGroupedByOrder(srcList, plateW, plateH, gap, onProgress);
-        if (g) return g;
-        try { console.warn('[Rotula] agrupado por pedidos no disponible (identidad no propagada) → nesting normal'); } catch (e) {}
-      }
+  // v100: bloques por pedido (maquetación VCarve). Sustituye a las bandas verticales de v82.
+  // Una pieza con "Placa fija" manda sobre el bloque → nesting normal, que sí la respeta.
+  if (__NEST_CFG__.groupOrders && clipperOK() && !srcList.some(p => Number.isInteger(p.forceSheet) && p.forceSheet >= 0)) {
+    if (retales && retales.length)
+      try { console.warn('[Rotula] bloques por pedido → se ignoran ' + retales.length + ' retal(es) en este nesting (un retal trocearía los pedidos)'); } catch (e) {}
+    let g = null;
+    try {
+      g = await nestByOrderBlocks(srcList, plateW, plateH, gap, onProgress);
+    } catch (e) {
+      if (e && e.message === '__NEST_CANCELLED__') throw e;
+      console.warn('[Rotula] bloques por pedido falló → nesting normal:', e && e.message);
     }
+    // nestByOrderBlocks ya comprueba solapes con la geometría real de cada pieza (todas sus
+    // formas) y lanza si los hubiera; _sheetsArtworkOverlap no sirve aquí: trata lo que no
+    // es <path> (polygon, rect, circle de un SVG) como su rectángulo y da falsos positivos.
+    if (g && g.length) return g;
   }
   if (!retales || !retales.length || !nfpActive) {
     if (retales && retales.length && !nfpActive)
@@ -12455,9 +13110,25 @@ function pieceToPolylinesMM(piece, maxN) {
   // ornamento con un trazo larguísimo generaba ~26000 muestras → bloqueo síncrono de ~9 s.
   // La exportación DXF/SVG llama SIN maxN ⇒ sigue a precisión completa.
   const attrNum = (el, name) => parseFloat(el.getAttribute(name)) || 0;
+  /* v100: getCTM() lleva hasta el VIEWPORT del <svg> oculto, cuyo tamaño Chrome redondea a
+     1/64 px: en una pieza fina (un guion de 3,4 mm = 3,4 px de alto) eso es un 0,3 % de
+     escala y el guion de 91,7 mm salía de 91,45. La matriz se compone a mano con los
+     transform de los antecesores hasta el <svg>: coordenadas del viewBox exactas, sin
+     depender de la maquetación del navegador. */
+  const userMatrix = el => {
+    let m = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+    for (let n = el; n && n !== svg; n = n.parentNode) {
+      const t = n.transform && n.transform.baseVal && n.transform.baseVal.consolidate();
+      if (!t) continue;
+      const k = t.matrix; // m = k · m
+      m = { a: k.a * m.a + k.c * m.b, b: k.b * m.a + k.d * m.b, c: k.a * m.c + k.c * m.d, d: k.b * m.c + k.d * m.d, e: k.a * m.e + k.c * m.f + k.e, f: k.b * m.e + k.d * m.f + k.f };
+    }
+    return m;
+  };
   for (const el of elements) {
-    const ctm = el.getCTM();
-    if (!ctm) continue;
+    const ctm = userMatrix(el);
+    const ox = vbX,
+      oy = vbY;
     const sampler = PLACED_SHAPE_SAMPLERS[el.tagName.toLowerCase()];
     if (!sampler) continue;
     const elCapa = capaOfEl(el);
@@ -12466,7 +13137,7 @@ function pieceToPolylinesMM(piece, maxN) {
       fitScale,
       maxSamples: maxN,
       num: attrNum,
-      toMM: (px, py) => vb2mm(ctm.a * px + ctm.c * py + ctm.e, ctm.b * px + ctm.d * py + ctm.f)
+      toMM: (px, py) => vb2mm(ctm.a * px + ctm.c * py + ctm.e - ox, ctm.b * px + ctm.d * py + ctm.f - oy)
     };
     for (const raw of sampler(el, ctx)) {
       // v98: punto ÚNICO por el que pasa toda la geometría (export, lienzo, editor y
@@ -12561,150 +13232,210 @@ function ptsToD(pts) {
   if (closed) d += "Z";
   return d;
 }
+/* ══ v100 · RÓTULOS DE PEDIDO FUERA DE LA PLACA ═══════════════════════════════════════
+   Como en la maqueta de VCarve: encima de la placa el material ("PVC 3MM NEGRO") y, junto
+   a cada bloque, su código de pedido en el color del pedido, FUERA de la plancha (no se
+   corta y no tapa piezas). Se escriben con una fuente de TRAZO SENCILLO propia, como
+   polilíneas: el DXF/SVG/PDF los lleva como vectores y VCarve los muestra igual que el
+   lienzo, sin depender de qué fuentes tenga instaladas la máquina. Lienzo, PDF, SVG y DXF
+   usan la misma función de reparto, así que los cuatro rotulan en el mismo sitio. */
+const _sfArc = (cx, cy, rx, ry, a0, a1) => {
+  const n = Math.max(2, Math.ceil(Math.abs(a1 - a0) / 12)), out = [];
+  for (let i = 0; i <= n; i++) {
+    const a = (a0 + (a1 - a0) * i / n) * Math.PI / 180;
+    out.push([cx + rx * Math.cos(a), cy + ry * Math.sin(a)]);
+  }
+  return out;
+};
+const _sfP = (...xy) => { const o = []; for (let i = 0; i < xy.length; i += 2) o.push([xy[i], xy[i + 1]]); return o; };
+const _sfDot = (x, y) => _sfP(x, y, x + 0.06, y, x + 0.06, y + 0.06, x, y + 0.06, x, y);
+/* Glifos en unidades de altura de mayúscula (y hacia ARRIBA, línea base en 0): [ancho, trazos]. */
+const STROKE_FONT = {
+  " ": [0.42, []],
+  A: [0.72, [_sfP(0, 0, 0.36, 1, 0.72, 0), _sfP(0.13, 0.35, 0.59, 0.35)]],
+  B: [0.59, [[..._sfP(0, 0.53, 0, 1, 0.3, 1), ..._sfArc(0.3, 0.765, 0.235, 0.235, 90, -90), ..._sfP(0, 0.53)], [..._sfP(0, 0.53, 0.32, 0.53), ..._sfArc(0.32, 0.265, 0.265, 0.265, 90, -90), ..._sfP(0, 0, 0, 0.53)]]],
+  C: [0.86, [_sfArc(0.5, 0.5, 0.5, 0.5, 45, 315)]],
+  D: [0.78, [[..._sfP(0, 0, 0, 1, 0.28, 1), ..._sfArc(0.28, 0.5, 0.5, 0.5, 90, -90), ..._sfP(0, 0)]]],
+  E: [0.56, [_sfP(0.56, 1, 0, 1, 0, 0, 0.56, 0), _sfP(0, 0.52, 0.48, 0.52)]],
+  F: [0.54, [_sfP(0.54, 1, 0, 1, 0, 0), _sfP(0, 0.52, 0.46, 0.52)]],
+  G: [1, [[..._sfArc(0.5, 0.5, 0.5, 0.5, 45, 360), ..._sfP(0.58, 0.5)]]],
+  H: [0.7, [_sfP(0, 0, 0, 1), _sfP(0.7, 0, 0.7, 1), _sfP(0, 0.52, 0.7, 0.52)]],
+  I: [0, [_sfP(0, 0, 0, 1)]],
+  J: [0.48, [[..._sfP(0.48, 1, 0.48, 0.26), ..._sfArc(0.24, 0.26, 0.24, 0.26, 0, -180)]]],
+  K: [0.64, [_sfP(0, 0, 0, 1), _sfP(0.62, 1, 0, 0.36), _sfP(0.2, 0.55, 0.64, 0)]],
+  L: [0.52, [_sfP(0, 1, 0, 0, 0.52, 0)]],
+  M: [0.9, [_sfP(0, 0, 0.08, 1, 0.45, 0.08, 0.82, 1, 0.9, 0)]],
+  N: [0.72, [_sfP(0, 0, 0, 1, 0.72, 0, 0.72, 1)]],
+  O: [1, [_sfArc(0.5, 0.5, 0.5, 0.5, 0, 360)]],
+  P: [0.56, [[..._sfP(0, 0, 0, 1, 0.3, 1), ..._sfArc(0.3, 0.74, 0.26, 0.26, 90, -90), ..._sfP(0, 0.48)]]],
+  Q: [1, [_sfArc(0.5, 0.5, 0.5, 0.5, 0, 360), _sfP(0.62, 0.28, 0.98, -0.06)]],
+  R: [0.6, [[..._sfP(0, 0, 0, 1, 0.3, 1), ..._sfArc(0.3, 0.74, 0.26, 0.26, 90, -90), ..._sfP(0, 0.48)], _sfP(0.28, 0.48, 0.6, 0)]],
+  S: [0.6, [[..._sfArc(0.3, 0.75, 0.27, 0.25, 20, 270), ..._sfArc(0.3, 0.25, 0.3, 0.25, 90, -160)]]],
+  T: [0.66, [_sfP(0, 1, 0.66, 1), _sfP(0.33, 1, 0.33, 0)]],
+  U: [0.68, [[..._sfP(0, 1, 0, 0.34), ..._sfArc(0.34, 0.34, 0.34, 0.34, 180, 360), ..._sfP(0.68, 1)]]],
+  V: [0.72, [_sfP(0, 1, 0.36, 0, 0.72, 1)]],
+  W: [1.06, [_sfP(0, 1, 0.26, 0, 0.53, 0.82, 0.8, 0, 1.06, 1)]],
+  X: [0.68, [_sfP(0, 1, 0.68, 0), _sfP(0, 0, 0.68, 1)]],
+  Y: [0.7, [_sfP(0, 1, 0.35, 0.5, 0.7, 1), _sfP(0.35, 0.5, 0.35, 0)]],
+  Z: [0.64, [_sfP(0.02, 1, 0.64, 1, 0, 0, 0.64, 0)]],
+  "0": [0.62, [_sfArc(0.31, 0.5, 0.31, 0.5, 0, 360)]],
+  "1": [0.3, [_sfP(0, 0.8, 0.3, 1, 0.3, 0)]],
+  "2": [0.6, [[..._sfArc(0.29, 0.71, 0.29, 0.29, 165, -35), ..._sfP(0, 0, 0.6, 0)]]],
+  "3": [0.58, [[..._sfArc(0.27, 0.75, 0.25, 0.25, 155, -90), ..._sfArc(0.27, 0.25, 0.3, 0.25, 90, -155)]]],
+  "4": [0.62, [_sfP(0.46, 0, 0.46, 1, 0, 0.3, 0.62, 0.3)]],
+  "5": [0.6, [[..._sfP(0.54, 1, 0.1, 1, 0.08, 0.55), ..._sfArc(0.3, 0.31, 0.3, 0.31, 130, -150)]]],
+  "6": [0.62, [_sfP(0.5, 1, 0.07, 0.43), _sfArc(0.31, 0.31, 0.31, 0.31, 0, 360)]],
+  "7": [0.58, [_sfP(0, 1, 0.58, 1, 0.16, 0)]],
+  "8": [0.6, [_sfArc(0.3, 0.76, 0.24, 0.24, 0, 360), _sfArc(0.3, 0.26, 0.3, 0.26, 0, 360)]],
+  "9": [0.62, [_sfArc(0.31, 0.69, 0.31, 0.31, 0, 360), _sfP(0.6, 0.6, 0.12, 0)]],
+  "-": [0.4, [_sfP(0, 0.42, 0.4, 0.42)]],
+  "_": [0.6, [_sfP(0, -0.1, 0.6, -0.1)]],
+  ".": [0.06, [_sfDot(0, 0)]],
+  ",": [0.08, [_sfP(0.06, 0.06, 0, -0.12)]],
+  ":": [0.06, [_sfDot(0, 0), _sfDot(0, 0.5)]],
+  "/": [0.5, [_sfP(0, 0, 0.5, 1)]],
+  "#": [0.66, [_sfP(0.2, 0, 0.3, 1), _sfP(0.42, 0, 0.52, 1), _sfP(0, 0.34, 0.62, 0.34), _sfP(0.04, 0.66, 0.66, 0.66)]],
+  "+": [0.56, [_sfP(0, 0.45, 0.56, 0.45), _sfP(0.28, 0.17, 0.28, 0.73)]],
+  "\xd7": [0.5, [_sfP(0, 0.25, 0.5, 0.75), _sfP(0, 0.75, 0.5, 0.25)]],
+  "(": [0.2, [_sfArc(0.6, 0.45, 0.6, 0.7, 130, 230)]],
+  ")": [0.2, [_sfArc(-0.4, 0.45, 0.6, 0.7, 50, -50)]]
+};
+const STROKE_FONT_SPACING = 0.24;
+const strokeTextClean = s => String(s == null ? "" : s).toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+/* Ancho del texto en mm para una altura de mayúscula `size`. */
+function strokeTextWidth(text, size) {
+  const s = strokeTextClean(text);
+  let w = 0;
+  for (let i = 0; i < s.length; i++) w += ((STROKE_FONT[s[i]] || STROKE_FONT[" "])[0] + (i ? STROKE_FONT_SPACING : 0)) * size;
+  return w;
+}
+/* Polilíneas (mm, y hacia abajo) del texto con la línea base en `y`. align: start|middle|end. */
+function strokeTextPolylines(text, x, y, size, align) {
+  const s = strokeTextClean(text);
+  const w = strokeTextWidth(s, size);
+  let cx = align === "middle" ? x - w / 2 : align === "end" ? x - w : x;
+  const out = [];
+  for (let i = 0; i < s.length; i++) {
+    const g = STROKE_FONT[s[i]] || STROKE_FONT[" "];
+    if (i) cx += STROKE_FONT_SPACING * size;
+    for (const st of g[1]) out.push(st.map(([gx, gy]) => ({ x: cx + gx * size, y: y - gy * size })));
+    cx += g[0] * size;
+  }
+  return out;
+}
+/* Cuerpo de los rótulos según la placa: ~4,5 % del lado corto (90 mm en una 2000×3000, a la
+   escala de la maqueta) y el título algo más del doble. */
+const orderLabelSize = (w, h) => Math.max(20, Math.round(Math.min(w, h) * 0.045));
+/* Bloques por pedido de una hoja a partir de cajas sueltas [{key, color, x, y, w, h}]. */
+function mergeOrderBoxes(boxes) {
+  const m = new Map();
+  for (const b of boxes || []) {
+    if (!b || !b.key || !(b.w >= 0)) continue;
+    const e = m.get(b.key);
+    if (!e) { m.set(b.key, { key: b.key, color: b.color, x: b.x, y: b.y, w: b.w, h: b.h }); continue; }
+    const x1 = Math.max(e.x + e.w, b.x + b.w), y1 = Math.max(e.y + e.h, b.y + b.h);
+    e.x = Math.min(e.x, b.x); e.y = Math.min(e.y, b.y); e.w = x1 - e.x; e.h = y1 - e.y;
+  }
+  return [...m.values()];
+}
+/* Dónde va cada rótulo. frame = {x0,y0,w,h} de la placa; blocks = mergeOrderBoxes(...).
+   Lado: el borde de la placa más cercano al bloque; si el bloque toca dos bordes (esquina),
+   arriba/abajo para bloques apaisados e izquierda/derecha para los altos — es lo que hace
+   la maqueta de referencia. Los rótulos de un mismo lado se apartan para no pisarse. */
+function orderLabelLayout(frame, blocks, title) {
+  const { x0, y0, w, h } = frame;
+  const LS = orderLabelSize(w, h), M = LS * 0.6, TS = Math.round(LS * 2.2);
+  const near = LS * 1.5;
+  const sides = { left: [], right: [], top: [], bottom: [] };
+  for (const b of blocks || []) {
+    const d = { left: b.x - x0, right: x0 + w - (b.x + b.w), top: b.y - y0, bottom: y0 + h - (b.y + b.h) };
+    const touching = Object.keys(d).filter(k => d[k] <= near);
+    let side;
+    if (touching.length >= 2) {
+      const pref = b.w >= b.h ? ["top", "bottom", "left", "right"] : ["left", "right", "top", "bottom"];
+      side = pref.find(k => touching.includes(k));
+    } else side = Object.keys(d).reduce((a, k) => d[k] < d[a] ? k : a, "left");
+    sides[side].push({ b, tw: strokeTextWidth(b.key, LS) });
+  }
+  const labels = [];
+  // izquierda/derecha: centrados en altura con el bloque, separados ≥ 1,5 cuerpos
+  for (const side of ["left", "right"]) {
+    const L = sides[side].map(e => ({ ...e, c: e.b.y + e.b.h / 2 })).sort((a, b) => a.c - b.c);
+    const step = LS * 1.6;
+    for (let i = 1; i < L.length; i++) if (L[i].c < L[i - 1].c + step) L[i].c = L[i - 1].c + step;
+    const over = L.length ? L[L.length - 1].c + LS / 2 - (y0 + h) : 0;
+    if (over > 0) for (const e of L) e.c -= over; // no bajar de la placa: se sube el grupo
+    for (const e of L) labels.push({ key: e.b.key, color: e.b.color, side, size: LS, x: side === "left" ? x0 - M : x0 + w + M, y: e.c + LS / 2, align: side === "left" ? "end" : "start", w: e.tw });
+  }
+  // arriba/abajo: centrados con el bloque; si se pisan se empujan y, si no caben, otra fila
+  const rows = { top: 0, bottom: 0 };
+  for (const side of ["top", "bottom"]) {
+    const L = sides[side].map(e => ({ ...e, c: e.b.x + e.b.w / 2 })).sort((a, b) => a.c - b.c);
+    const ends = [];
+    for (const e of L) {
+      let row = 0, start;
+      for (;; row++) {
+        start = Math.max(e.c - e.tw / 2, ends[row] == null ? -Infinity : ends[row] + LS);
+        if (ends[row] == null || start + e.tw <= x0 + w + LS * 6) break;
+      }
+      ends[row] = start + e.tw;
+      const off = M + row * LS * 1.7;
+      labels.push({ key: e.b.key, color: e.b.color, side, size: LS, x: start, y: side === "top" ? y0 - off : y0 + h + off + LS, align: "start", w: e.tw });
+    }
+    rows[side] = ends.length;
+  }
+  const titleY = y0 - M - rows.top * LS * 1.7 - M * 0.6;
+  const t = title ? { text: title, size: TS, x: x0 + w / 2, y: titleY, align: "middle", w: strokeTextWidth(title, TS) } : null;
+  const ext = {
+    left: Math.max(0, ...sides.left.map(e => e.tw + M)),
+    right: Math.max(0, ...sides.right.map(e => e.tw + M)),
+    top: t ? y0 - titleY + TS * 1.05 : rows.top ? M + rows.top * LS * 1.7 : 0,
+    bottom: rows.bottom ? M + rows.bottom * LS * 1.7 : 0
+  };
+  if (t) ext.left = Math.max(ext.left, t.w / 2 - w / 2), ext.right = Math.max(ext.right, t.w / 2 - w / 2);
+  for (const L of labels) L.polylines = strokeTextPolylines(L.key, L.x, L.y, L.size, L.align);
+  if (t) t.polylines = strokeTextPolylines(t.text, t.x, t.y, t.size, t.align);
+  return { labels, title: t, ext, size: LS };
+}
 /* ═══════════════════════════════════════════════════════════════════════════
    §10 · EXPORTADORES: DXF · SVG · PDF Y DESCARGA
    Escritores de DXF R12 y SVG plano por capas, PDF de vista previa a escala
    real (escritor propio) y utilidad de descarga de ficheros.
    ═══════════════════════════════════════════════════════════════════════════ */
-function buildDXF(sheet, plateW, plateH, sheetIndex, capas) {
-  capas = capas && capas.length ? capas : CAPAS_INIT;
-  const geo = extractSheetGeometry(sheet, capas);
-  // v80: nombre de capa DXF por polil\u00ednea = nombre ORIGINAL verbatim (data-layer de
-  // Illustrator/DXF, ej. "LAT\u00d3N CORTE", "AGUJEROS") si existe; si no, la capa del programa.
-  const layerNameFor = (pl, piece) => {
-    const c = capaById(capas, pl.capa || piece.capa || "corte");
-    return { name: dxfLayerVerbatim(pl.layer) || capaDXFName(c), aci: hexToACI(c.color) };
-  };
-  const usedLayers = new Map(),
-    usedOffsetIds = new Set();
-  geo.forEach(g => {
-    g.polylines.forEach(pl => {
-      const L = layerNameFor(pl, g.piece);
-      if (!usedLayers.has(L.name)) usedLayers.set(L.name, L.aci);
+/* v100: geometría de una placa del anidado lista para los escritores del editor (los mismos
+   que usa "Exportar" en el lienzo): contornos con su pedido y color, y los rótulos de fuera
+   de la placa. Antes buildDXF/buildSVG eran una segunda copia de los escritores que además
+   rotulaba el nombre de CADA pieza encima de ella en el DXF (capa ETIQUETAS), justo lo que
+   v96 quitó del lienzo porque tapaba la placa. ctx = { cmap, title }. */
+function sheetExportData(sheet, plateW, plateH, capas, ctx) {
+  const bw = sheet._retal ? sheet._binW : plateW,
+    bh = sheet._retal ? sheet._binH : plateH;
+  const cmap = ctx && ctx.cmap || orderColorMap(sheet.pieces || []);
+  const items = [],
+    boxes = [];
+  for (const piece of sheet.pieces || []) {
+    const key = orderKeyOf(piece) || null,
+      color = orderColorOf(piece, cmap) || "#1f2937";
+    const pls = pieceToPolylinesMM(piece).polylines || [];
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    pls.forEach(pl => {
+      if (pl.length < 2) return;
+      items.push({ pts: pl, closed: isClosedPts(pl), capa: pl.capa || piece.capa || "corte", layer: pl.layer || null, ref: key, color });
+      pl.forEach(q => { if (q.x < x0) x0 = q.x; if (q.y < y0) y0 = q.y; if (q.x > x1) x1 = q.x; if (q.y > y1) y1 = q.y; });
     });
-    g.offsets.forEach(o => usedOffsetIds.add(o.capa));
-  });
-  const lines = [];
-  const w = (code, value) => {
-    lines.push(String(code));
-    lines.push(String(value));
-  };
-  w(0, "SECTION");
-  w(2, "HEADER");
-  w(9, "$INSUNITS");
-  w(70, 4);
-  w(9, "$EXTMIN");
-  w(10, 0);
-  w(20, 0);
-  w(30, 0);
-  w(9, "$EXTMAX");
-  w(10, plateW);
-  w(20, plateH);
-  w(30, 0);
-  w(0, "ENDSEC");
-  const layerDefs = [["PLACA", 8], ["ETIQUETAS", 8]];
-  usedLayers.forEach((aci, name) => layerDefs.push([name, aci]));
-  capas.forEach(c => {
-    if (usedOffsetIds.has(c.id)) layerDefs.push([capaDXFName(c) + "_OFFSET", hexToACI(shadeHex(c.color, -0.4))]);
-  });
-  w(0, "SECTION");
-  w(2, "TABLES");
-  w(0, "TABLE");
-  w(2, "LAYER");
-  w(70, layerDefs.length);
-  for (const [name, aci] of layerDefs) {
-    w(0, "LAYER");
-    w(2, name);
-    w(70, 0);
-    w(62, aci);
-    w(6, "CONTINUOUS");
+    if (key && isFinite(x0)) boxes.push({ key, color, x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
   }
-  w(0, "ENDTAB");
-  w(0, "ENDSEC");
-  w(0, "SECTION");
-  w(2, "ENTITIES");
-  w(0, "LWPOLYLINE");
-  w(8, "PLACA");
-  w(90, 4);
-  w(70, 1);
-  w(10, 0);
-  w(20, plateH);
-  w(10, plateW);
-  w(20, plateH);
-  w(10, plateW);
-  w(20, 0);
-  w(10, 0);
-  w(20, 0);
-  const writePoly = (pts, layerName) => {
-    if (pts.length < 2) return;
-    const closed = isClosedPts(pts);
-    const pp = closed ? pts.slice(0, -1) : pts;
-    w(0, "LWPOLYLINE");
-    w(8, layerName);
-    w(90, pp.length);
-    w(70, closed ? 1 : 0);
-    for (const p of pp) {
-      w(10, _mmNum(p.x));
-      w(20, _mmNum(plateH - p.y));
-    }
-  };
-  for (const g of geo) {
-    for (const pl of g.polylines) writePoly(pl, layerNameFor(pl, g.piece).name);
-    for (const off of g.offsets) {
-      const lname = capaDXFName(capaById(capas, off.capa)) + "_OFFSET";
-      for (const pts of off.polys) writePoly(pts, lname);
-    }
-    if (g.label) {
-      const piece = g.piece;
-      const cxMM = piece.x + piece.placedW / 2;
-      const cyMM = piece.y + piece.placedH / 2;
-      const textH = Math.min(20, Math.max(6, Math.min(piece.placedW, piece.placedH) * 0.06));
-      w(0, "TEXT");
-      w(8, "ETIQUETAS");
-      w(10, 0);
-      w(20, 0);
-      w(30, 0);
-      w(40, _mmNum(textH));
-      w(1, g.label);
-      w(72, 1);
-      w(11, _mmNum(cxMM));
-      w(21, _mmNum(plateH - cyMM));
-      w(31, 0);
-      w(73, 2);
-    }
-  }
-  w(0, "ENDSEC");
-  w(0, "EOF");
-  return lines.join("\r\n");
+  const frame = { x0: 0, y0: 0, w: bw, h: bh };
+  const layout = orderLabelLayout(frame, mergeOrderBoxes(boxes), ctx && ctx.title || "");
+  return { items, frame, bw, bh, layout, labels: labelExportItems([{ frame, ...layout }], 0, 0) };
 }
-function buildSVG(sheet, plateW, plateH, sheetIndex, capas) {
-  capas = capas && capas.length ? capas : CAPAS_INIT;
-  const geo = extractSheetGeometry(sheet, capas);
-  const groups = {};
-  // v80: agrupar por nombre de capa VERBATIM (mismo criterio que buildDXF).
-  const groupFor = (capaId, isOffset, layerName) => {
-    const c = capaById(capas, capaId);
-    const vname = !isOffset && dxfLayerVerbatim(layerName) || null;
-    const key = (vname || c.id) + (isOffset ? "__off" : "");
-    if (!groups[key]) groups[key] = {
-      name: vname || capaDXFName(c) + (isOffset ? "_OFFSET" : ""),
-      color: isOffset ? shadeHex(c.color, -0.4) : c.color,
-      ds: []
-    };
-    return groups[key];
-  };
-  for (const g of geo) {
-    for (const pl of g.polylines) groupFor(pl.capa || g.piece.capa || "corte", false, pl.layer).ds.push(ptsToD(pl));
-    for (const off of g.offsets) for (const pts of off.polys) groupFor(off.capa, true, null).ds.push(ptsToD(pts));
-  }
-  let body = '<g id="PLACA"><rect x="0" y="0" width="' + plateW + '" height="' + plateH + '" fill="none" stroke="#000000" stroke-width="0.2"/></g>\n';
-  for (const key in groups) {
-    const gr = groups[key];
-    body += '<g id="' + gr.name + '" fill="none" stroke="' + gr.color + '" stroke-width="0.2">\n';
-    for (const d of gr.ds) if (d) body += '<path d="' + d + '"/>\n';
-    body += '</g>\n';
-  }
-  return '<?xml version="1.0" encoding="UTF-8"?>\n' + '<svg xmlns="http://www.w3.org/2000/svg" width="' + plateW + 'mm" height="' + plateH + 'mm" viewBox="0 0 ' + plateW + ' ' + plateH + '">\n' + body + '</svg>';
+function buildDXF(sheet, plateW, plateH, sheetIndex, capas, ctx) {
+  const d = sheetExportData(sheet, plateW, plateH, capas && capas.length ? capas : CAPAS_INIT, ctx);
+  return edBuildDXF(d.items, d.bw, d.bh, capas, [d.frame], d.labels);
+}
+function buildSVG(sheet, plateW, plateH, sheetIndex, capas, ctx) {
+  const d = sheetExportData(sheet, plateW, plateH, capas && capas.length ? capas : CAPAS_INIT, ctx);
+  return edBuildSVG(d.items, d.bw, d.bh, capas, [d.frame], d.labels);
 }
 /* ══ v94: EXPORTACIÓN PDF — vista previa del nesting para producción/panel ═══════════
    Genera un PDF vectorial a ESCALA REAL (1 mm = 1 mm), una página por placa:
@@ -12745,7 +13476,7 @@ function buildNestPDF(sheets, plateW, plateH, capas, meta) {
        de la placa dentro de la página: hay que conocerla antes de convertir coordenadas. */
     const legend = new Map();
     geo.forEach(g => {
-      const ref = refOf(g.piece);
+      const ref = orderKeyOf(g.piece);
       if (!ref) return;
       const e = legend.get(ref) || { ref, col: orderColorOf(g.piece, cmap) || "#1f2937", n: 0 };
       e.n++;
@@ -12778,12 +13509,24 @@ function buildNestPDF(sheets, plateW, plateH, capas, meta) {
       });
       if (row.length) legRows.push(row);
     }
-    const headerMM = MARG + sTitle * 1.25 + sSub * 1.7 + MARG * 0.5;
-    const footerMM = legRows.length ? MARG * 0.85 + sLeg * 1.5 + legRows.length * sLeg * 1.95 + MARG : MARG * 0.6;
+    /* v100: rótulos de pedido junto a su bloque, FUERA de la placa, y el título del material
+       encima (lo mismo que el lienzo y el DXF). Ocupan margen alrededor de la placa. */
+    const _boxes = [];
+    geo.forEach(g => {
+      const key = orderKeyOf(g.piece);
+      if (!key) return;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      g.polylines.forEach(pl => pl.forEach(q => { if (q.x < x0) x0 = q.x; if (q.y < y0) y0 = q.y; if (q.x > x1) x1 = q.x; if (q.y > y1) y1 = q.y; }));
+      if (isFinite(x0)) _boxes.push({ key, color: orderColorOf(g.piece, cmap) || "#1f2937", x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+    });
+    const lay = orderLabelLayout({ x0: 0, y0: 0, w: bw, h: bh }, mergeOrderBoxes(_boxes), meta.title || "");
+    const padL = lay.ext.left + MARG, padR = lay.ext.right + MARG;
+    const headerMM = MARG + sTitle * 1.25 + sSub * 1.7 + MARG * 0.5 + lay.ext.top;
+    const footerMM = (legRows.length ? MARG * 0.85 + sLeg * 1.5 + legRows.length * sLeg * 1.95 + MARG : MARG * 0.6) + lay.ext.bottom;
     // Coordenadas: la app usa y hacia abajo con origen arriba-izquierda de la placa;
     // el PDF usa y hacia arriba. Se convierte punto a punto (sin matrices): la placa se
     // apoya sobre la banda de referencias y deja la cabecera por encima.
-    const X = x => _pdfNum(x * PDF_MM);
+    const X = x => _pdfNum((padL + x) * PDF_MM);
     const Y = y => _pdfNum((footerMM + bh - y) * PDF_MM);
     const ops = [];
     // Contorno de la placa: 're' toma esquina inferior-izquierda (que es y=bh en la app).
@@ -12834,6 +13577,20 @@ function buildNestPDF(sheets, plateW, plateH, capas, meta) {
       });
     });
     ops.push(...fillOps, ...strokeOps);
+    // v100: rótulos y título alrededor de la placa, con la fuente de trazo de la exportación
+    const strokeLabel = (pls, hex, wmm) => {
+      const [r, gg, b] = _pdfHexRGB(hex);
+      let d = _pdfNum(wmm * PDF_MM) + " w 1 J 1 j " + _pdfNum(r) + " " + _pdfNum(gg) + " " + _pdfNum(b) + " RG\n";
+      pls.forEach(pts => {
+        if (pts.length < 2) return;
+        d += X(pts[0].x) + " " + Y(pts[0].y) + " m";
+        for (let i = 1; i < pts.length; i++) d += " " + X(pts[i].x) + " " + Y(pts[i].y) + " l";
+        d += " S\n";
+      });
+      ops.push(d);
+    };
+    if (lay.title) strokeLabel(lay.title.polylines, "#111827", Math.max(0.6, lay.title.size * 0.03));
+    lay.labels.forEach(lb => strokeLabel(lb.polylines, lb.color, Math.max(0.5, lb.size * 0.035)));
     // ── cabecera: título y material/grosor/placa n de total ──
     const topPt = (footerMM + bh + headerMM) * PDF_MM;
     const title = "NESTING" + (meta.matName ? " \xb7 " + meta.matName : "") + (meta.thk ? " \xb7 " + meta.thk + " mm" : "");
@@ -12848,7 +13605,7 @@ function buildNestPDF(sheets, plateW, plateH, capas, meta) {
        sus piezas y el texto va en tinta negra, que se lee mejor que el color sobre papel. */
     if (legRows.length) {
       const footY = mm => _pdfNum((footerMM - mm) * PDF_MM); // mm hacia abajo desde el borde inferior de la placa
-      let fy = MARG * 0.85;
+      let fy = lay.ext.bottom + MARG * 0.85; // v100: debajo de los rótulos de abajo
       ops.push("BT /F2 " + _pdfNum(sLeg * 0.9 * PDF_MM) + " Tf 0.45 0.47 0.5 rg " + _pdfNum(MARG * PDF_MM) + " " + footY(fy + sLeg * 0.9) + " Td (" + _pdfTxt("REFERENCIAS \xb7 cada color identifica un pedido") + ") Tj ET");
       fy += sLeg * 1.5;
       legRows.forEach(row => {
@@ -12866,7 +13623,7 @@ function buildNestPDF(sheets, plateW, plateH, capas, meta) {
       });
     }
     pages.push({
-      wPt: bw * PDF_MM,
+      wPt: (padL + bw + padR) * PDF_MM,
       hPt: (footerMM + bh + headerMM) * PDF_MM,
       content: ops.filter(Boolean).join("\n")
     });
@@ -13323,6 +14080,7 @@ function objectToPiece(o, idx) {
   const inner = '<path d="' + d.trim() + '" fill-rule="evenodd" data-capa="' + capa + '"/>';
   return {
     label: o.name || (ED_TYPE_LABEL[o.type] || "Pieza") + " " + idx,
+    ref: o.__ref || null, // v100: el pedido viaja con la pieza (bloque, color y rótulo)
     w: Math.round(w * 10) / 10,
     h: Math.round(h * 10) / 10,
     svgContent: inner,
@@ -13428,7 +14186,7 @@ function piecesToEditorObjects(pieces, plateW) {
     const base = pieceToEditorObject(pc, 0, 0);
     if (!base) return;
     base.__srcColor = orderColorOf(pc, _cmap); // v94: color por REFERENCIA del pedido
-    base.__ref = refOf(pc); // v94: rótulo que se pinta en la placa
+    base.__ref = orderKeyOf(pc); // v94/v100: código del pedido (rótulo y bloque)
     const w = base._w || 60,
       h = base._h || 60;
     for (let k = 0; k < n; k++) {
@@ -13461,7 +14219,7 @@ async function placedToEditorObjects(sheets, plateW, plateH, silent) {
   /* v89: hojas en FILA horizontal (una al lado de otra). v86 las apiló en columna; con la
      placa ya en retrato (v88) el usuario las quiere lado a lado. Consumidores de edSheets
      usan x0/y0 genéricos, así que solo cambia el reparto (offX en vez de offY). */
-  const GAPX = Math.max(40, Math.round(plateW * 0.04));
+  const GAPX = edSheetGap(plateW, plateH, (sheets || []).flatMap(sh => (sh.pieces || []).map(orderKeyOf))); // v100: sitio para rótulos
   const objs = [],
     edSheets = [];
   const total = (sheets || []).reduce((s, sh) => s + (sh.pieces || []).length, 0);
@@ -13503,7 +14261,7 @@ async function placedToEditorObjects(sheets, plateW, plateH, silent) {
       o.name = p.label || o.name;
       o.capa = p.capa || "corte";
       o.__srcColor = orderColorOf(p, _cmap); // v94: color por REFERENCIA del pedido
-      o.__ref = refOf(p); // v94: rótulo que se pinta en la placa
+      o.__ref = orderKeyOf(p); // v94/v100: código del pedido (rótulo y bloque)
       o.rot = p.rotated ? p.rotation || 0 : 0;
       o.cx = offX + p.x + p.placedW / 2;
       o.cy = p.y + p.placedH / 2;
@@ -13563,6 +14321,59 @@ function edFitView(pw, ph, bw, bh) {
     vh
   };
 }
+/* v100: encuadre de un rectángulo cualquiera (placas + rótulos de fuera de la placa). */
+function edFitRect(x0, y0, w, h, bw, bh) {
+  bw = bw || 900;
+  bh = bh || 560;
+  const ar = bw / bh;
+  let vw = w * 1.06,
+    vh = vw / ar;
+  if (vh < h * 1.06) {
+    vh = h * 1.06;
+    vw = vh * ar;
+  }
+  return { vx: x0 + (w - vw) / 2, vy: y0 + (h - vh) / 2, vw, vh };
+}
+/* v100: rótulos de pedido de cada hoja del lienzo, a partir de la posición REAL de los
+   objetos (si se arrastra un bloque, su rótulo le sigue). Un objeto pertenece a la hoja
+   que contiene su centro, como en la exportación por hoja. */
+function edOrderLabels(objects, frames, title) {
+  const out = [];
+  (frames || []).forEach(fr => {
+    const boxes = [];
+    for (const o of objects || []) {
+      if (!o.__ref) continue;
+      if (!(o.cx >= fr.x0 - 1e-6 && o.cx <= fr.x0 + fr.w + 1e-6 && o.cy >= fr.y0 - 1e-6 && o.cy <= fr.y0 + fr.h + 1e-6)) continue;
+      const b = boundsOf(worldSubpaths(o));
+      boxes.push({ key: o.__ref, color: o.__srcColor || "#1f2937", x: b.minX, y: b.minY, w: b.w, h: b.h });
+    }
+    const blocks = mergeOrderBoxes(boxes);
+    if (!blocks.length && !title) return;
+    out.push({ frame: fr, ...orderLabelLayout(fr, blocks, title) });
+  });
+  return out;
+}
+/* Caja que abarca las hojas y sus rótulos. */
+function edLabelsBounds(frames, layouts) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  (frames || []).forEach(f => { x0 = Math.min(x0, f.x0); y0 = Math.min(y0, f.y0); x1 = Math.max(x1, f.x0 + f.w); y1 = Math.max(y1, f.y0 + f.h); });
+  (layouts || []).forEach(L => {
+    const f = L.frame;
+    x0 = Math.min(x0, f.x0 - L.ext.left); x1 = Math.max(x1, f.x0 + f.w + L.ext.right);
+    y0 = Math.min(y0, f.y0 - L.ext.top); y1 = Math.max(y1, f.y0 + f.h + L.ext.bottom);
+  });
+  if (!isFinite(x0)) return { x0: 0, y0: 0, w: 1, h: 1 };
+  return { x0, y0, w: x1 - x0, h: y1 - y0 };
+}
+/* v100: separación entre hojas del lienzo: con rótulos a los lados, los de la derecha de una
+   placa y los de la izquierda de la siguiente necesitan sitio para no pisarse. */
+function edSheetGap(plateW, plateH, keys) {
+  const base = Math.max(40, Math.round(plateW * 0.04));
+  const LS = orderLabelSize(plateW, plateH);
+  let maxW = 0;
+  (keys || []).forEach(k => { if (k) maxW = Math.max(maxW, strokeTextWidth(k, LS)); });
+  return maxW ? Math.max(base, Math.round(2 * (maxW + LS * 0.6) + LS * 2)) : base;
+}
 function edChooseStep(mmPerPx) {
   const target = 44 * mmPerPx,
     steps = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000];
@@ -13599,7 +14410,9 @@ function edWorldItems(objects, rect) {
         })),
         closed,
         capa: meta && meta.capa || o.capa || "corte",
-        layer: meta && meta.layer || null
+        layer: meta && meta.layer || null,
+        ref: o.__ref || null, // v100: pedido → capa propia y color del pedido en el DXF/SVG
+        color: o.__srcColor || null
       });
     });
   });
@@ -13608,14 +14421,19 @@ function edWorldItems(objects, rect) {
 function _edItemsByCapa(items, capas) {
   capas = capas && capas.length ? capas : CAPAS_INIT;
   const groups = {};
-  const gFor = (capaId, isOffset, layerName) => {
+  const gFor = (capaId, isOffset, layerName, ref, refColor) => {
     const c = capaById(capas, capaId);
-    const vname = !isOffset && dxfLayerVerbatim(layerName) || null; // v80: capa verbatim
-    const key = (vname || c.id) + (isOffset ? "__off" : "");
+    // v100: el CORTE de un pedido va en una capa con el código del pedido y su color, como se
+    // maqueta en VCarve (cada pedido en su color). Hendidos/taladros/cajeados conservan su
+    // capa: llevan otra herramienta.
+    const orderLayer = !isOffset && c.id === "corte" && ref ? orderLayerName(ref) : null;
+    const vname = orderLayer || !isOffset && dxfLayerVerbatim(layerName) || null; // v80: capa verbatim
+    const key = (orderLayer ? "ord:" + orderLayer : vname || c.id) + (isOffset ? "__off" : "");
+    const col = orderLayer && refColor ? refColor : isOffset ? shadeHex(c.color, -0.4) : c.color;
     if (!groups[key]) groups[key] = {
       name: vname || capaDXFName(c) + (isOffset ? "_OFFSET" : ""),
-      color: isOffset ? shadeHex(c.color, -0.4) : c.color,
-      aci: hexToACI(isOffset ? shadeHex(c.color, -0.4) : c.color),
+      color: col,
+      aci: hexToACI(col),
       lists: []
     };
     return groups[key];
@@ -13628,7 +14446,7 @@ function _edItemsByCapa(items, capas) {
     const closedPts = it.closed ? [...pts, {
       ...pts[0]
     }] : pts;
-    gFor(cid, false, it.layer).lists.push({
+    gFor(cid, false, it.layer, it.ref, it.color).lists.push({
       pts: closedPts,
       closed: it.closed
     });
@@ -13644,13 +14462,49 @@ function _edItemsByCapa(items, capas) {
   }
   return groups;
 }
-function edBuildSVG(items, W, H, capas, frames) {
+/* v100: capas por pedido en el DXF/SVG (como en la maqueta de VCarve, cada pedido en su
+   color). El rótulo de cada pedido va en su PROPIA capa —"<código> ETIQUETA", mismo color—
+   para que nunca entre en la trayectoria de corte al seleccionar la capa del pedido, y el
+   título del material en ETIQUETAS. */
+const orderLayerName = ref => dxfLayerVerbatim(ref) || "CORTE";
+const orderLabelLayerName = ref => dxfLayerVerbatim(ref + " ETIQUETA");
+const TITLE_LAYER = "ETIQUETAS";
+/* Polilíneas de los rótulos (salida de orderLabelLayout) listas para exportar, en las
+   coordenadas del archivo (desplazadas dx, dy). */
+function labelExportItems(layouts, dx, dy) {
+  const out = [];
+  (layouts || []).forEach(L => {
+    const push = (pls, name, color) => pls.forEach(pts => out.push({ pts: pts.map(p => ({ x: p.x - (dx || 0), y: p.y - (dy || 0) })), name, color }));
+    if (L.title) push(L.title.polylines, TITLE_LAYER, "#000000");
+    L.labels.forEach(lb => push(lb.polylines, orderLabelLayerName(lb.key), lb.color));
+  });
+  return out;
+}
+/* Caja de todo lo que se exporta: placas, contornos y rótulos. */
+function _exportBounds(frames, groups, labels) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const add = p => { if (p.x < x0) x0 = p.x; if (p.y < y0) y0 = p.y; if (p.x > x1) x1 = p.x; if (p.y > y1) y1 = p.y; };
+  (frames || []).forEach(f => { add({ x: f.x0, y: f.y0 }); add({ x: f.x0 + f.w, y: f.y0 + f.h }); });
+  Object.values(groups || {}).forEach(g => g.lists.forEach(l => l.pts.forEach(add)));
+  (labels || []).forEach(l => l.pts.forEach(add));
+  return { x0, y0, x1, y1 };
+}
+/* Agrupa los rótulos por capa (nombre) conservando el orden de aparición. */
+function _labelGroups(labels) {
+  const m = new Map();
+  (labels || []).forEach(l => {
+    if (!m.has(l.name)) m.set(l.name, { name: l.name, color: l.color, aci: hexToACI(l.color), lists: [] });
+    m.get(l.name).lists.push({ pts: l.pts, closed: isClosedPts(l.pts) });
+  });
+  return [...m.values()];
+}
+function edBuildSVG(items, W, H, capas, frames, labels) {
   frames = frames && frames.length ? frames : [{ x0: 0, y0: 0, w: W, h: H }]; // v80
   const groups = _edItemsByCapa(items, capas);
-  let body = '<g id="PLACA">' + frames.map(fr => '<rect x="' + fr.x0 + '" y="' + fr.y0 + '" width="' + fr.w + '" height="' + fr.h + '" fill="none" stroke="#000000" stroke-width="0.2"/>').join('') + '</g>\n';
-  for (const key in groups) {
-    const gr = groups[key];
-    body += '<g id="' + gr.name + '" fill="none" stroke="' + gr.color + '" stroke-width="0.2">\n';
+  const lgroups = _labelGroups(labels);
+  let body = '<g id="PLACA">' + frames.map(fr => '<rect x="' + _mmNum(fr.x0) + '" y="' + _mmNum(fr.y0) + '" width="' + _mmNum(fr.w) + '" height="' + _mmNum(fr.h) + '" fill="none" stroke="#000000" stroke-width="0.2"/>').join('') + '</g>\n';
+  const writeGroup = gr => {
+    body += '<g id="' + gr.name.replace(/[<>&"]/g, "_") + '" fill="none" stroke="' + gr.color + '" stroke-width="0.2">\n';
     gr.lists.forEach(({
       pts
     }) => {
@@ -13658,46 +14512,55 @@ function edBuildSVG(items, W, H, capas, frames) {
       if (d) body += '<path d="' + d + '"/>\n';
     });
     body += '</g>\n';
-  }
-  return '<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="' + W + 'mm" height="' + H + 'mm" viewBox="0 0 ' + W + ' ' + H + '">\n' + body + '</svg>';
+  };
+  for (const key in groups) writeGroup(groups[key]);
+  lgroups.forEach(writeGroup);
+  // v100: el lienzo del SVG abarca también los rótulos de fuera de la placa
+  const b = _exportBounds(frames, groups, labels);
+  const vx = Math.min(0, b.x0), vy = Math.min(0, b.y0), vw = Math.max(W, b.x1) - vx, vh = Math.max(H, b.y1) - vy;
+  return '<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="' + _mmNum(vw) + 'mm" height="' + _mmNum(vh) + 'mm" viewBox="' + _mmNum(vx) + ' ' + _mmNum(vy) + ' ' + _mmNum(vw) + ' ' + _mmNum(vh) + '">\n' + body + '</svg>';
 }
-function edBuildDXF(items, W, H, capas, frames) {
+function edBuildDXF(items, W, H, capas, frames, labels) {
   frames = frames && frames.length ? frames : [{ x0: 0, y0: 0, w: W, h: H }]; // v80
   const groups = _edItemsByCapa(items, capas);
+  const lgroups = _labelGroups(labels);
   const L = [];
   const w = (c, v) => {
     L.push(String(c));
     L.push(String(v));
   };
+  // DXF: y hacia arriba con origen en la esquina inferior izquierda de la placa (la de VCarve)
+  const X = x => _mmNum(x), Y = y => _mmNum(H - y);
+  const b = _exportBounds(frames, groups, labels);
   w(0, "SECTION");
   w(2, "HEADER");
   w(9, "$INSUNITS");
   w(70, 4);
   w(9, "$EXTMIN");
-  w(10, 0);
-  w(20, 0);
+  w(10, X(Math.min(0, b.x0)));
+  w(20, Y(Math.max(H, b.y1)));
   w(30, 0);
   w(9, "$EXTMAX");
-  w(10, W);
-  w(20, H);
+  w(10, X(Math.max(W, b.x1)));
+  w(20, Y(Math.min(0, b.y0)));
   w(30, 0);
   w(0, "ENDSEC");
-  const keys = Object.keys(groups);
+  const all = [...Object.values(groups), ...lgroups];
   w(0, "SECTION");
   w(2, "TABLES");
   w(0, "TABLE");
   w(2, "LAYER");
-  w(70, keys.length + 1);
+  w(70, all.length + 1);
   w(0, "LAYER");
   w(2, "PLACA");
   w(70, 0);
   w(62, 8);
   w(6, "CONTINUOUS");
-  keys.forEach(k => {
+  all.forEach(g => {
     w(0, "LAYER");
-    w(2, groups[k].name);
+    w(2, g.name);
     w(70, 0);
-    w(62, groups[k].aci);
+    w(62, g.aci);
     w(6, "CONTINUOUS");
   });
   w(0, "ENDTAB");
@@ -13710,29 +14573,30 @@ function edBuildDXF(items, W, H, capas, frames) {
     w(8, "PLACA");
     w(90, 4);
     w(70, 1);
-    w(10, fr.x0.toFixed(4));
-    w(20, (H - fr.y0).toFixed(4));
-    w(10, (fr.x0 + fr.w).toFixed(4));
-    w(20, (H - fr.y0).toFixed(4));
-    w(10, (fr.x0 + fr.w).toFixed(4));
-    w(20, (H - (fr.y0 + fr.h)).toFixed(4));
-    w(10, fr.x0.toFixed(4));
-    w(20, (H - (fr.y0 + fr.h)).toFixed(4));
+    w(10, X(fr.x0));
+    w(20, Y(fr.y0));
+    w(10, X(fr.x0 + fr.w));
+    w(20, Y(fr.y0));
+    w(10, X(fr.x0 + fr.w));
+    w(20, Y(fr.y0 + fr.h));
+    w(10, X(fr.x0));
+    w(20, Y(fr.y0 + fr.h));
   });
-  keys.forEach(k => {
-    groups[k].lists.forEach(({
+  all.forEach(g => {
+    g.lists.forEach(({
       pts,
       closed
     }) => {
       const pp = closed && isClosedPts(pts) ? pts.slice(0, -1) : pts;
       if (pp.length < 2) return;
       w(0, "LWPOLYLINE");
-      w(8, groups[k].name);
+      w(8, g.name);
       w(90, pp.length);
       w(70, closed ? 1 : 0);
       pp.forEach(p => {
-        w(10, p.x.toFixed(4));
-        w(20, (H - p.y).toFixed(4));
+        // v100: misma resolución (1 µm, sin ceros de relleno) que buildDXF desde v98
+        w(10, X(p.x));
+        w(20, Y(p.y));
       });
     });
   });
@@ -13740,27 +14604,37 @@ function edBuildDXF(items, W, H, capas, frames) {
   w(0, "EOF");
   return L.join("\r\n");
 }
-function edBuildPDF(items, Wmm, Hmm, frames) {
+function edBuildPDF(items, Wmm, Hmm, frames, labels) {
   frames = frames && frames.length ? frames : [{ x0: 0, y0: 0, w: Wmm, h: Hmm }]; // v80
-  const k = 72 / 25.4,
-    Wp = Wmm * k,
-    Hp = Hmm * k;
+  const k = 72 / 25.4;
+  // v100: la página abarca los rótulos de fuera de la placa (antes salían recortados)
+  const bb = _exportBounds(frames, { i: { lists: items } }, labels);
+  const ox = Math.min(0, bb.x0), oy = Math.min(0, bb.y0);
+  const PW = Math.max(Wmm, bb.x1) - ox, PH = Math.max(Hmm, bb.y1) - oy;
+  const Wp = PW * k,
+    Hp = PH * k;
   const f = n => (Math.round(n * 1000) / 1000).toString();
+  const px = x => f((x - ox) * k), py = y => f((PH - (y - oy)) * k);
   let c = "0 0 0 RG 0.5 w\n";
   frames.forEach(fr => {
-    const x0 = fr.x0 * k, x1 = (fr.x0 + fr.w) * k;
-    const yT = (Hmm - fr.y0) * k, yB = (Hmm - (fr.y0 + fr.h)) * k;
-    c += f(x0) + " " + f(yB) + " m " + f(x1) + " " + f(yB) + " l " + f(x1) + " " + f(yT) + " l " + f(x0) + " " + f(yT) + " l h S\n";
+    c += px(fr.x0) + " " + py(fr.y0 + fr.h) + " m " + px(fr.x0 + fr.w) + " " + py(fr.y0 + fr.h) + " l " + px(fr.x0 + fr.w) + " " + py(fr.y0) + " l " + px(fr.x0) + " " + py(fr.y0) + " l h S\n";
   });
-  c += "1 0 0 RG 0.567 w\n";
-  items.forEach(it => {
-    const pts = it.pts;
-    if (pts.length < 2) return;
+  const rgb = hex => _pdfHexRGB(hex).map(f).join(" ");
+  const stroke = (pts, closed) => {
     let body = "";
     pts.forEach((p, i) => {
-      body += f(p.x * k) + " " + f((Hmm - p.y) * k) + (i ? " l " : " m ");
+      body += px(p.x) + " " + py(p.y) + (i ? " l " : " m ");
     });
-    c += body + (it.closed ? "h S\n" : "S\n");
+    return body + (closed ? "h S\n" : "S\n");
+  };
+  c += "0.567 w\n";
+  items.forEach(it => {
+    if (it.pts.length < 2) return;
+    // v100: cada pedido en su color (antes todo en rojo)
+    c += rgb(it.color && (it.capa || "corte") === "corte" ? it.color : "#FF0000") + " RG\n" + stroke(it.pts, it.closed);
+  });
+  (labels || []).forEach(l => {
+    if (l.pts.length >= 2) c += rgb(l.color) + " RG\n" + stroke(l.pts, isClosedPts(l.pts));
   });
   const objs = ["<</Type/Catalog/Pages 2 0 R>>", "<</Type/Pages/Kids[3 0 R]/Count 1>>", "<</Type/Page/Parent 2 0 R/MediaBox[0 0 " + f(Wp) + " " + f(Hp) + "]/Contents 4 0 R/Resources<<>>>>", "<</Length " + c.length + ">>\nstream\n" + c + "endstream"];
   let pdf = "%PDF-1.4\n";
@@ -13804,7 +14678,8 @@ function VectorEditor({
   inbox,
   onReady,
   onOpenCapas,
-  capas
+  capas,
+  sheetTitle
 }) {
   const [objects, setObjects] = useState([]);
   const [hiLayer, setHiLayer] = useState(null); // demo-11: capa (nombre real) resaltada en el lienzo
@@ -13865,6 +14740,8 @@ function VectorEditor({
     w: plateW,
     h: plateH
   }]);
+  /* v100: rótulos de pedido y título de material alrededor de cada hoja (fuera de la placa). */
+  const orderLabels = React.useMemo(() => edOrderLabels(objects, edSheets, sheetTitle), [objects, edSheets, sheetTitle]);
   const [nesting, setNesting] = useState(false);
   const [expSheet, setExpSheet] = useState(-1);
   /* v85: lienzo a pantalla completa (móvil). Pseudo-fullscreen con position:fixed
@@ -13954,7 +14831,9 @@ function VectorEditor({
       w: plateW,
       h: plateH
     }]);
-    setView(edFitView(plateW, plateH, box.w || 900, box.h || 560));
+    const _fr = [{ x0: 0, y0: 0, w: plateW, h: plateH }];
+    const _bb = edLabelsBounds(_fr, edOrderLabels([], _fr, sheetTitle)); // v100: con el título a la vista
+    setView(edFitRect(_bb.x0, _bb.y0, _bb.w, _bb.h, box.w || 900, box.h || 560));
   }, [plateW, plateH]);
   useEffect(() => {
     if (!inbox || !inbox.seq) return;
@@ -13978,9 +14857,9 @@ function VectorEditor({
             w: plateW,
             h: plateH
           }]);
-          const totalW = shs.length ? shs.reduce((m, e) => Math.max(m, e.x0 + e.w), 0) : plateW; // v89: fila
-          const totalH = shs.length ? shs.reduce((m, e) => Math.max(m, e.y0 + e.h), 0) : plateH;
-          setView(edFitView(totalW, totalH, box.w, box.h));
+          const _fr = shs.length ? shs : [{ x0: 0, y0: 0, w: plateW, h: plateH }];
+          const _bb = edLabelsBounds(_fr, edOrderLabels(objs, _fr, sheetTitle)); // v100: placas + rótulos
+          setView(edFitRect(_bb.x0, _bb.y0, _bb.w, _bb.h, box.w, box.h));
           ok = true;
         } finally {
           if (!auto) reportProgress(null);
@@ -14272,6 +15151,7 @@ function VectorEditor({
         pc.id = o.id;
         pc.__edid = o.id;
         pc.quantity = 1;
+        pc.ref = o.__ref || null; // v100: bloques por pedido también al re-anidar en el lienzo
         return pc;
       });
       const fpw = fullPlateW || plateW,
@@ -14284,7 +15164,7 @@ function VectorEditor({
         showToast("El nesting no devolvió hojas", "error");
         return;
       }
-      const GAP = Math.max(40, Math.round(fpw * 0.04)); // v89: fila horizontal
+      const GAP = edSheetGap(fpw, fph, objects.map(o => o.__ref)); // v89: fila horizontal · v100: sitio para rótulos
       let _off = 0;
       const sheets = res.map(sh => {
         const bw = sh._retal ? sh._binW : fpw;
@@ -14344,9 +15224,8 @@ function VectorEditor({
       setEdSheets(sheets);
       setSel([]);
       setExpSheet(-1);
-      const totalW = sheets.reduce((m, e) => Math.max(m, e.x0 + e.w), 0); // v89: fila
-      const totalH = sheets.reduce((m, e) => Math.max(m, e.y0 + e.h), fph);
-      setView(edFitView(totalW, totalH, box.w, box.h));
+      const _bb = edLabelsBounds(sheets, edOrderLabels(objects.map(o => upd[o.id] ? { ...o, ...upd[o.id] } : o), sheets, sheetTitle)); // v100
+      setView(edFitRect(_bb.x0, _bb.y0, _bb.w, _bb.h, box.w, box.h));
       const _nr = res.filter(s => s._retal).length;
       showToast("Nesting: " + res.length + " hoja(s)" + (_nr ? " (" + _nr + " retal)" : "") + ". Ajusta a mano lo que quieras.");
     } catch (e) {
@@ -14407,17 +15286,20 @@ function VectorEditor({
       showToast("No hay contornos en esa hoja", "error");
       return;
     }
+    // v100: rótulos de pedido y título de las hojas exportadas, en coordenadas del archivo
+    const _lay = expSheet >= 0 ? orderLabels.filter(L => L.frame === edSheets[expSheet]) : orderLabels;
+    const labels = labelExportItems(_lay, rect.x0, rect.y0);
     let content, mime, ext;
     if (fmt === "svg") {
-      content = edBuildSVG(items, W, H, capas, frames);
+      content = edBuildSVG(items, W, H, capas, frames, labels);
       mime = "image/svg+xml";
       ext = "svg";
     } else if (fmt === "dxf") {
-      content = edBuildDXF(items, W, H, capas, frames);
+      content = edBuildDXF(items, W, H, capas, frames, labels);
       mime = "application/dxf";
       ext = "dxf";
     } else {
-      content = edBuildPDF(items, W, H, frames);
+      content = edBuildPDF(items, W, H, frames, labels);
       mime = "application/pdf";
       ext = fmt === "ai" ? "ai" : "pdf";
     }
@@ -15296,7 +16178,10 @@ function VectorEditor({
     })
   }, "\uFF0D"), React.createElement(Btn, {
     s: true,
-    onClick: () => setView(edFitView(plateW, plateH, box.w, box.h))
+    onClick: () => {
+      const _bb = edLabelsBounds(edSheets, orderLabels); // v100: todas las hojas y sus rótulos
+      setView(edFitRect(_bb.x0, _bb.y0, _bb.w, _bb.h, box.w, box.h));
+    }
   }, "Encajar"), React.createElement("span", {
     style: {
       flex: 1
@@ -15620,6 +16505,24 @@ function VectorEditor({
     fill: s.retal ? "#E6007E" : "#94a3b8",
     fontFamily: "Inter, sans-serif"
   }, s.retal ? "Retal" : "Hoja " + (i + 1))), objects.map(o => renderObj(o, sel.includes(o.id), false)),
+  /* v100: rótulos de pedido FUERA de la placa (color del pedido) y título del material
+     encima, con la misma fuente de trazo que llevan el DXF/SVG/PDF. */
+  React.createElement("g", {
+    key: "orderlabels",
+    fill: "none",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    style: { pointerEvents: "none" }
+  }, orderLabels.map((L, li) => React.createElement("g", { key: "ol" + li }, L.title && React.createElement("path", {
+    d: L.title.polylines.map(ptsToD).join(""),
+    stroke: "#111827",
+    strokeWidth: 1.6 * mmPerPx
+  }), L.labels.map(lb => React.createElement("path", {
+    key: lb.key,
+    d: lb.polylines.map(ptsToD).join(""),
+    stroke: lb.color,
+    strokeWidth: 1.6 * mmPerPx
+  }))))),
   /* v94: capa de RÓTULOS — la referencia del pedido sobre cada pieza, en el color del
      pedido. Va por encima del corte y NO rota con la pieza (debe leerse siempre en
      horizontal). El cuerpo es físico (mm, igual que en el PDF) pero nunca baja de ~11 px
@@ -16193,6 +17096,9 @@ function App() {
   const [materials, setMaterials] = useState(() => LS.get("np-mats-v2", MATERIALS_INIT));
   const [selMat, setSelMat] = useState(0);
   const [selThk, setSelThk] = useState(0);
+  // v100: color de la plancha para el título de la placa ("PVC 3MM NEGRO"); llega con el lote
+  // del panel (matColor / matLabel) o lo escribe el operario.
+  const [sheetMatColor, setSheetMatColor] = useState("");
   const [plateW, setPlateW] = useState(2000);
   const [plateH, setPlateH] = useState(3000);
   const [pieces, setPieces] = useState([]);
@@ -16872,6 +17778,7 @@ function App() {
   };
   const pendingLeftovers = (RETALES_ENABLED && nestResult) ? computeLeftovers(nestResult, plateW, plateH, (materials[selMat] || {}).name, _currentThk()) : [];
   const _edRetalOpts = retalesForMaterial(retales, (materials[selMat] || {}).name, _currentThk());
+  const _sheetTitle = sheetTitleText((materials[selMat] || {}).name, _currentThk(), sheetMatColor); // v100
   const _edSurf = editorSurface !== "plate" ? _edRetalOpts.find(r => r.id === editorSurface) : null;
   const editorSurfaceVal = _edSurf ? editorSurface : "plate";
   const edPlateW = _edSurf ? _edSurf.w : plateW;
@@ -16920,8 +17827,11 @@ function App() {
   const _pdfMeta = cutId => ({
     matName: materials[selMat]?.name || "",
     thk: materials[selMat]?.thickness?.[selThk] ?? "",
-    cutId: cutId || ""
+    cutId: cutId || "",
+    title: _sheetTitle // v100: "PVC 3MM NEGRO" encima de la placa
   });
+  // v100: mismo color por pedido que el lienzo (repartido sobre TODO el anidado) y título
+  const _exportCtx = () => ({ cmap: orderColorMap((nestResult || []).flatMap(sh => sh.pieces || [])), title: _sheetTitle });
   const exportSheet = (sheetIdx, format) => {
     if (!nestResult || !nestResult[sheetIdx]) return;
     try {
@@ -16929,10 +17839,10 @@ function App() {
       const prefix = _exportPrefix();
       const suffix = "Placa" + (sheetIdx + 1) + "_" + nestResult.length;
       if (format === "dxf") {
-        const dxf = buildDXF(sheet, plateW, plateH, sheetIdx, capas);
+        const dxf = buildDXF(sheet, plateW, plateH, sheetIdx, capas, _exportCtx());
         downloadFile(prefix + "_" + suffix + ".dxf", dxf, "application/dxf");
       } else if (format === "svg") {
-        const svg = buildSVG(sheet, plateW, plateH, sheetIdx, capas);
+        const svg = buildSVG(sheet, plateW, plateH, sheetIdx, capas, _exportCtx());
         downloadFile(prefix + "_" + suffix + ".svg", svg, "image/svg+xml");
       } else if (format === "pdf") {
         const pdf = buildNestPDF([sheet], plateW, plateH, capas, _pdfMeta());
@@ -16962,10 +17872,10 @@ function App() {
       nestResult.forEach((sheet, i) => {
         const suffix = "Placa" + (i + 1) + "_" + nestResult.length;
         if (format === "dxf") {
-          const dxf = buildDXF(sheet, plateW, plateH, i, capas);
+          const dxf = buildDXF(sheet, plateW, plateH, i, capas, _exportCtx());
           downloadFile(prefix + "_" + suffix + ".dxf", dxf, "application/dxf");
         } else if (format === "svg") {
-          const svg = buildSVG(sheet, plateW, plateH, i, capas);
+          const svg = buildSVG(sheet, plateW, plateH, i, capas, _exportCtx());
           downloadFile(prefix + "_" + suffix + ".svg", svg, "image/svg+xml");
         }
       });
@@ -17030,6 +17940,7 @@ function App() {
       setSelMat(b.matIdx);
       setSelThk(_thkIndex(materials[b.matIdx], b.thk));
     }
+    setSheetMatColor(b.matColor || "");
     applyPlate(b.plateW, b.plateH); // v88: retrato
     if (b.result && b.result.length) {
       // demo-7: con lote grande la lista (una tarjeta por pieza) bloqueaba el primer
@@ -17085,10 +17996,14 @@ function App() {
       const matName = o.matName || "Sin material";
       const matIdx = _matIndexByName(matName);
       const mat = matIdx >= 0 ? materials[matIdx] : null;
-      const key = matName.trim().toLowerCase() + "|" + (o.thk || 0); // demo-6: lote por material+grosor
+      // v100: el COLOR de la plancha también separa lotes: PVC 3 mm negro y PVC 3 mm blanco
+      // son planchas distintas y antes compartían placa.
+      const matColor = orderMatColor(o);
+      const key = matName.trim().toLowerCase() + "|" + (o.thk || 0) + "|" + matColor.toLowerCase(); // demo-6: lote por material+grosor
       if (!byMat.has(key)) byMat.set(key, {
         matName,
         matIdx,
+        matColor,
         thk: o.thk || (mat && mat.thickness[0]) || 0,
         plateW: mat ? Math.min(mat.plateW, mat.plateH) : 2000, // v88: retrato
         plateH: mat ? Math.max(mat.plateW, mat.plateH) : 3000,
@@ -17097,18 +18012,7 @@ function App() {
         result: null
       });
       const b = byMat.get(key);
-      const multi = res.pieces.length > 1;
-      const pcs = res.pieces.map((p, i) => ({
-        ...p,
-        id: "in-" + Date.now() + "-" + (o.ref || "o") + "-" + i,
-        fileName: o.fileName || (o.ref || "pedido") + "." + (o.fileType || "svg"),
-        ref: o.ref || null, // v94: referencia del pedido (color + rótulo en la placa)
-        label: o.ref ? o.ref + (multi ? " #" + (i + 1) : "") : p.label,
-        quantity: i === 0 && o.qty ? o.qty : p.quantity || 1,
-        forceSheet: null,
-        mat: matName
-      }));
-      b.pieces.push(...pcs);
+      b.pieces.push(...orderToPieces(o, res.pieces, matName));
     }
     const batchList = Array.from(byMat.values());
     /* v94: dentro de cada lote, las piezas se ORDENAN POR REFERENCIA para que la lista y
@@ -17686,7 +18590,7 @@ function App() {
     style: {
       color: "#E6007E"
     }
-  }, "v99"))))), tab === "nesting" && React.createElement("div", {
+  }, "v100"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",
@@ -17732,7 +18636,14 @@ function App() {
   }).thickness.map((t, i) => React.createElement("option", {
     key: i,
     value: i
-  }, t, " mm")))), React.createElement(CfgNum, {
+  }, t, " mm")))), React.createElement(Cfg, {
+    label: "Color plancha"
+  }, React.createElement("input", {
+    value: sheetMatColor,
+    placeholder: "p. ej. NEGRO",
+    title: "Va en el t\xEDtulo de la placa (\"PVC 3MM NEGRO\") en el lienzo y en los archivos exportados",
+    onChange: e => setSheetMatColor(e.target.value.toUpperCase())
+  })), React.createElement(CfgNum, {
     label: "Ancho placa (mm)",
     value: plateW,
     onChange: v => {
@@ -17982,7 +18893,26 @@ function App() {
       __NEST_CFG__.nfp = e.target.checked;
       setNestResult(null);
     }
-  }), "Motor denso (NFP)")), React.createElement("button", {
+  }), "Motor denso (NFP)"), React.createElement("label", {
+    title: "Cada pedido en su bloque compacto, con su referencia rotulada fuera de la placa (maquetaci\xF3n VCarve). Desact\xEDvalo para mezclar piezas de pedidos y apurar material.",
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 5,
+      fontSize: 12,
+      color: "#555",
+      fontWeight: 600,
+      cursor: "pointer"
+    }
+  }, React.createElement("input", {
+    type: "checkbox",
+    checked: groupOrders,
+    onChange: e => {
+      setGroupOrders(e.target.checked);
+      __NEST_CFG__.groupOrders = e.target.checked; // v100: bloques por pedido
+      setNestResult(null);
+    }
+  }), "Agrupar por pedido")), React.createElement("button", {
     onClick: runNesting,
     disabled: nesting,
     className: "btn-glow",
@@ -18081,7 +19011,8 @@ function App() {
     inbox: editorInbox,
     onReady: handleEditorReady,
     onOpenCapas: () => setCapasAdvOpen(true),
-    capas: capas
+    capas: capas,
+    sheetTitle: _sheetTitle
   })), React.createElement("div", {
     style: {
       display: nestResult ? "block" : "none",

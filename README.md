@@ -33,7 +33,8 @@ Abre cualquiera de los dos HTML directamente en Chrome. React, ReactDOM y Clippe
           content: "<svg…>",        // SVG en texto, o PDF/AI en base64
           matName: "PVC",           // debe coincidir con un material
           thk: 5,                   // grosor en mm
-          qty: 3                    // cantidad
+          matLabel: "Plancha De Pvc 5mm Pvc Negro", // opcional: color de plancha (título y lote)
+          qty: 3                    // copias del diseño entero
         }
       ]
     }
@@ -55,16 +56,53 @@ Abre cualquiera de los dos HTML directamente en Chrome. React, ReactDOM y Clippe
 ```
 
 Cuando un pedido no trae `content`, la app hace `GET {API_BASE}/orders/{id}` y
-espera `{ref, fileName, fileType, content, matName, thk, qty}`. `API_BASE` es
+espera `{ref, fileName, fileType, content, matName, thk, qty}` (y opcionalmente `matLabel` o
+`matColor`). `API_BASE` es
 `/api` por defecto y se puede cambiar con `window.NEST_API_BASE`. Los envíos con
 `content` inline siguen funcionando igual (100% compatible).
 
 La carpeta [`backend/`](backend/) trae una implementación lista en **PHP + MySQL**
 (esquema, endpoints y guía de despliegue).
 
+## Maquetación como en VCarve (v100)
+
+Lo que sale del nesting (lienzo, DXF, SVG y PDF) queda maquetado como se hace a mano en VCarve:
+
+- **Un bloque por pedido.** Las piezas de cada pedido se anidan juntas en un bloque compacto
+  (motor raster de forma real, letras preferentemente derechas) y los bloques se reparten por
+  la placa retrato. Entre pedidos queda más aire que entre letras de un mismo pedido. Casilla
+  «Agrupar por pedido» (activada por defecto); apagada vuelve al nesting libre de siempre.
+- **Código de pedido fuera de la placa**, junto a su bloque y en su color (`BDKGQVISY`, sin el
+  `-1` de la línea), y **título del material encima** (`PVC 3MM NEGRO`). Se escriben con una
+  fuente de trazo propia, como vectores, así VCarve los muestra igual que el lienzo.
+- **DXF/SVG con una capa por pedido** (nombre = código, color ACI = el mismo que en el lienzo) y
+  su rótulo en la capa `<código> ETIQUETA`; el título va en `ETIQUETAS`. Hendidos, taladros y
+  cajeados conservan su capa. Ya no se rotula el nombre de cada pieza encima de ella.
+- **Siempre espejado.** Toda pieza importada (PDF/AI, DXF, SVG) entra con volteo horizontal: las
+  letras se cortan boca abajo. Se aplica sobre la geometría de origen, así nesting, lienzo,
+  editor y exportación ven lo mismo (`__NEST_CFG__.mirror`).
+- **Color de plancha** («Color plancha»): llega del panel (`matColor`, o se deduce de
+  `matLabel`, p. ej. «Plancha De Pvc 3mm Pvc Negro») y separa lotes: PVC 3 mm negro y blanco ya
+  no comparten placa.
+- La **cantidad** de un pedido multiplica TODAS sus piezas (antes solo la primera).
+
+## Tests
+
+```bash
+npm i -D playwright            # una vez (usa Chromium)
+node tests/run-tests.js [carpeta-con-pdfs-del-panel]
+```
+
+Abre `rotula-nest.html` en Chromium y comprueba con archivos sintéticos (PDF, DXF y SVG que
+genera el propio test), con los 6 pedidos SVG reales que trae la demo y, si se pasa, con una
+carpeta de PDF reales: tamaño exacto de la geometría, espejo, cantidades, nesting sin solapes y
+dentro de placa, bloques por pedido, rótulos fuera de la placa, capas del DXF y el flujo
+completo panel → nesting → lienzo → exportar. `ROTULA_HTML=rotula-nest-demo.html` prueba la demo.
+pdf.js se descarga de cdnjs la primera vez (hace falta red).
+
 ## Funciones
 
-- Nesting automático de piezas irregulares (algoritmo Grid por defecto y motor NFP/DeepNest opt-in).
+- Nesting automático de piezas irregulares: bloques por pedido (por defecto), Grid y motor NFP.
 - Importación: SVG, DXF, PDF vectorial, Adobe Illustrator (AI).
   - Los rótulos que Illustrator escribe como **un solo trazado compuesto** se reparten en
     una pieza por letra (los huecos de la «a» o la «O» viajan con su letra).
