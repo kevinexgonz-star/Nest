@@ -336,6 +336,311 @@ async function main() {
     });
   }
 
+  /* ── v101 · lista por pedidos (pestañas plegables, visor, añadir/quitar, lotes) ── */
+  console.log('\nLista por pedidos (v101)');
+  // SVG con n rectángulos de 60×100 mm separados 150 mm → n piezas "Pieza k"
+  const svgShapes = n => {
+    let r = '';
+    for (let i = 0; i < n; i++) r += '<rect x="' + (20 + (i % 12) * 150) + '" y="' + (20 + Math.floor(i / 12) * 150) + '" width="60" height="100"/>';
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="2000mm" height="2000mm" viewBox="0 0 2000 2000">' + r + '</svg>';
+  };
+  const sOrder = (ref, file, n, mat, thk, qty) => ({ ref, fileName: file, fileType: 'svg', content: svgShapes(n), matName: mat, thk, qty });
+  const newPage = async (opts) => {
+    const c = opts ? await browser.newContext(opts) : ctx;
+    const pg = await c.newPage();
+    pg.on('console', m => logs.push(m.type() + ': ' + m.text()));
+    pg.on('pageerror', e => logs.push('pageerror: ' + e.message));
+    await pg.goto('file://' + HTML, { waitUntil: 'domcontentloaded' });
+    await pg.waitForFunction(() => typeof buildOrderGroups === 'function' && document.querySelector('#root').children.length > 0);
+    // demo: el panel de selección tapa la app hasta que llega un ROTULA_NEST_LOAD
+    await pg.evaluate(() => { const f = document.getElementById('rn-panel-frame'); if (f) f.style.display = 'none'; });
+    return { pg, close: () => (opts ? c.close() : pg.close()) };
+  };
+  const load = async (pg, orders) => {
+    await pg.evaluate(o => window.postMessage({ type: 'ROTULA_NEST_LOAD', payload: { orders: o } }, '*'), orders);
+    await pg.waitForSelector('#rotula-lotes-bar button', { timeout: 60000 });
+  };
+  const chip = (pg, txt) => pg.evaluate(t => { const b = [...document.querySelectorAll('#rotula-lotes-bar button')].find(x => x.textContent.indexOf(t) >= 0); b.click(); }, txt);
+  const grp = k => '[data-testid=order-group][data-order-key="' + k + '"]';
+  const cards = (pg, k) => pg.locator((k != null ? grp(k) + ' ' : '') + '[data-testid=piece-card]').count();
+  const txt = (pg, sel) => pg.locator(sel).first().innerText();
+  const canvasN = pg => pg.evaluate(() => (document.body.innerText.match(/(\d+) objeto\(s\) en el lienzo/) || [])[1] | 0);
+  const until = async (fn, ms, what) => { const t0 = Date.now(); for (;;) { const v = await fn(); if (v) return v; if (Date.now() - t0 > (ms || 15000)) throw new Error('tiempo agotado esperando ' + (what || '')); await new Promise(r => setTimeout(r, 120)); } };
+
+  await test('agrupar: pedidos, líneas, uds y "Sin pedido" al final', async () => {
+    const r = await page.evaluate(() => {
+      const ps = [...orderToPieces({ ref: 'ACORDEONA-1', qty: 2 }, [{ w: 1, h: 1 }, { w: 2, h: 2 }, { w: 3, h: 3 }], 'PVC'), { id: 'm1', label: 'Pieza Manual', w: 200, h: 200, quantity: 1, manual: true }, ...orderToPieces({ ref: 'ACORDEONB-2', qty: 1 }, [{ w: 5, h: 5 }], 'PVC'), ...orderToPieces({ ref: 'ACORDEONB-1', qty: 3 }, [{ w: 7, h: 7 }], 'PVC'), { id: 'f1', label: 'Pieza 1', fileName: 'logo.svg', w: 1, h: 1, quantity: 1 }];
+      const G = buildOrderGroups(ps);
+      return { rows: G.map(g => [g.key, g.nPieces, g.units, g.lines.length]), bLines: G[1].lines.map(l => l.key), bIdx: G[1].items.map(it => it.idx), loose: [G[3].loose, G[3].items.map(it => it.idx)], copies: ps.slice(0, 3).map(p => p.copies) };
+    });
+    assert(JSON.stringify(r.rows) === JSON.stringify([['ACORDEONA', 3, 6, 1], ['ACORDEONB', 2, 4, 2], ['logo', 1, 1, 1], ['', 1, 1, 0]]), JSON.stringify(r.rows));
+    assert(r.bLines.join() === 'ACORDEONB-2,ACORDEONB-1' && r.bIdx.join() === '4,5', JSON.stringify(r));
+    assert(r.loose[0] === true && r.loose[1].join() === '3' && r.copies.join() === '2,2,2', JSON.stringify(r));
+  });
+  await test('clave de pestaña estable al renombrar (y = orderKeyOf en pedidos reales)', async () => {
+    const r = await page.evaluate(orders => {
+      const a = [groupKeyOf({ fileName: 'GCTKASPDM-2-Roberto-Merani.pdf', label: 'Letra A' }), orderKeyOf({ fileName: 'GCTKASPDM-2-Roberto-Merani.pdf', label: 'Letra A' }), groupKeyOf({ ref: 'BDKGQVISY-1', label: 'X' }), groupKeyOf({ label: 'Rect 2' }), groupKeyOf({ fileName: 'logo.svg', label: 'Pieza 1' }), groupKeyOf({ ref: 'PED-001' })];
+      let diff = 0;
+      for (const o of orders) for (const p of orderToPieces(o, parseSVG(o.svg).pieces, o.matName)) if (groupKeyOf(p) !== orderKeyOf(p)) diff++;
+      return { a, diff };
+    }, demoOrders);
+    assert(JSON.stringify(r.a) === JSON.stringify(['GCTKASPDM', 'Letra A', 'BDKGQVISY', '', 'logo', 'PED-001']), JSON.stringify(r.a));
+    assert(r.diff === 0, r.diff + ' piezas de la demo con clave de lista distinta de la del motor');
+  });
+  await test('añadir a un pedido: ref de la línea, numeración, cantidad × copias, posición', async () => {
+    const r = await page.evaluate(() => {
+      const ps = [...orderToPieces({ ref: 'ACORDEONA-1', qty: 2 }, [{ w: 1, h: 1 }, { w: 2, h: 2 }, { w: 3, h: 3 }], 'PVC'), { id: 'm1', label: 'Pieza Manual', w: 200, h: 200, quantity: 1 }];
+      const G = buildOrderGroups(ps);
+      const t = orderTargetOf(G[0]);
+      const add = applyOrderTarget([{ id: 'x1', w: 9, h: 9, quantity: 1, fileName: 'ZZZZZZZZ-3-Otro.svg', label: 'Pieza 1' }, { id: 'x2', w: 9, h: 9 }], t, ps);
+      const out = insertAfterGroup(ps, 'ACORDEONA', add);
+      return { t, labels: add.map(p => p.label), q: add.map(p => p.quantity), fn: add[0].fileName, keys: add.map(groupKeyOf), order: out.map(p => p.id), n: ps.length, tail: insertAfterGroup(ps, 'NOPE', add).slice(-2).map(p => p.id), loose: orderTargetOf(G[1]), gap: applyOrderTarget([{ id: 'x3', w: 9, h: 9 }], t, [ps[0], ps[2]])[0].label };
+    });
+    assert(r.t.key === 'ACORDEONA' && r.t.ref === 'ACORDEONA-1' && r.t.copies === 2 && r.t.mat === 'PVC', JSON.stringify(r.t));
+    assert(r.labels.join() === 'ACORDEONA-1 #4,ACORDEONA-1 #5' && r.q.join() === '2,2', JSON.stringify(r));
+    assert(r.fn === 'ZZZZZZZZ-3-Otro.svg' && r.keys.join() === 'ACORDEONA,ACORDEONA', 'el destino manda sobre el nombre del archivo');
+    assert(r.order.slice(3, 6).join() === 'x1,x2,m1' && r.n === 4 && r.tail.join() === 'x1,x2' && r.loose === null, JSON.stringify(r.order));
+    assert(r.gap === 'ACORDEONA-1 #4', 'tras borrar #2 se repitió el número: ' + r.gap);
+  });
+  await test('cliente desde el nombre de archivo y medida REAL de corte', async () => {
+    const r = await page.evaluate(() => [orderClientOf('BDKGQVISY-1-Herminio-Lopez.pdf'), orderClientOf('LEEKSGMYP-5-Sara-Rotulatumismo__1_.svg'), orderClientOf('SDPXYXREP-7-Carlos-Diseno_Plancha.svg'), orderClientOf('logo.svg'), pieceRealSize({ w: 300, h: 200, viewBox: '0 0 60 100', svgContent: '<rect/>' })]);
+    assert(r[0] === 'Herminio Lopez' && r[1] === 'Sara Rotulatumismo' && r[2] === 'Carlos Diseno Plancha' && r[3] === '', JSON.stringify(r));
+    assert(Math.abs(r[4].w - 120) < 1e-6 && Math.abs(r[4].h - 200) < 1e-6 && Math.abs(r[4].ratio - 100 / 60) < 1e-9, JSON.stringify(r[4]));
+  });
+
+  // ── interfaz: un lote PVC con 2 pedidos (B en dos líneas) y un lote Opal con 1 ──
+  const UI = await newPage();
+  const P = UI.pg;
+  const ordersAB = [sOrder('ACORDEONA-1', 'ACORDEONA-1-Herminio-Lopez.svg', 3, 'PVC', 3, 2), sOrder('ACORDEONB-1', 'ACORDEONB-1-Roberto-Merani.svg', 2, 'PVC', 3, 1), sOrder('ACORDEONB-2', 'ACORDEONB-2-Roberto-Merani.svg', 2, 'PVC', 3, 1), sOrder('ACORDEONC-1', 'ACORDEONC-1-Elena-Cortina.svg', 1, 'Opal', 8, 1)];
+  await test('lote con varios pedidos: pestañas plegadas con color, cliente, uds y placa', async () => {
+    await load(P, ordersAB);
+    await P.waitForSelector(grp('ACORDEONC') + '[data-open="1"]', { timeout: 60000 }); // lote Opal: un único pedido, abierto
+    await chip(P, 'PVC');
+    await until(async () => (await P.locator('[data-testid=order-group]').count()) === 2 && (await P.locator(grp('ACORDEONA')).count()) === 1, 60000, 'pestañas del lote PVC');
+    assert((await cards(P)) === 0, 'con varios pedidos deben empezar plegados');
+    const a = await txt(P, grp('ACORDEONA') + ' [data-testid=order-toggle]');
+    assert(/3 pzs/.test(a) && /6 uds/.test(a) && /Herminio Lopez/.test(a) && /Placa 1/.test(a), a);
+    const b = await txt(P, grp('ACORDEONB') + ' [data-testid=order-toggle]');
+    assert(/2 líneas/.test(b) && /4 pzs/.test(b), b);
+    const sum = await txt(P, '[data-testid=orders-summary]');
+    assert(/2 pedidos · 7 pzs/.test(sum), sum);
+    const col = await P.evaluate(() => { const m = orderColorMap([{ ref: 'ACORDEONA-1' }, { ref: 'ACORDEONB-1' }]); const rgb = h => 'rgb(' + [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)).join(', ') + ')'; const sw = k => getComputedStyle(document.querySelector('[data-order-key="' + k + '"] [data-testid=order-swatch]')).backgroundColor; return [sw('ACORDEONA') === rgb(m.get('ACORDEONA')), sw('ACORDEONB') === rgb(m.get('ACORDEONB'))]; });
+    assert(col.every(Boolean), 'el color de la pestaña no es el del pedido en el lienzo/DXF');
+  });
+  await test('abrir y cerrar pestañas, "Abrir todo" con subcabecera por línea', async () => {
+    await P.click(grp('ACORDEONA') + ' [data-testid=order-toggle]');
+    assert((await P.getAttribute(grp('ACORDEONA') + ' [data-testid=order-toggle]', 'aria-expanded')) === 'true', 'aria-expanded');
+    assert((await cards(P, 'ACORDEONA')) === 3 && (await cards(P, 'ACORDEONB')) === 0, 'tarjetas al abrir A');
+    await P.click(grp('ACORDEONA') + ' [data-testid=order-toggle]');
+    assert((await cards(P)) === 0, 'al cerrar no quedan tarjetas');
+    await P.click('[data-testid=orders-toggle-all]');
+    assert((await cards(P)) === 7, 'Abrir todo');
+    const lines = await P.locator(grp('ACORDEONB') + ' [data-testid=order-line]').allInnerTexts();
+    assert(lines.length === 2 && /ACORDEONB-1 · 2 pzs/.test(lines[0]) && /ACORDEONB-2 · 2 pzs/.test(lines[1]), JSON.stringify(lines));
+    assert((await txt(P, '[data-testid=orders-toggle-all]')) === 'Cerrar todo', 'texto del botón');
+    await P.click('[data-testid=orders-toggle-all]');
+    assert((await cards(P)) === 0, 'Cerrar todo');
+  });
+  await test('dentro de la pestaña siguen las funciones de siempre (cantidad, quitar, capas)', async () => {
+    await P.click(grp('ACORDEONA') + ' [data-testid=order-toggle]');
+    const q = P.locator(grp('ACORDEONA') + ' [data-testid=piece-qty]').first();
+    await q.click(); await q.fill('5'); await q.press('Enter');
+    await until(async () => /9 uds/.test(await txt(P, grp('ACORDEONA') + ' [data-testid=order-counts]')), 5000, '9 uds');
+    await P.locator(grp('ACORDEONA') + ' [data-testid=piece-remove]').nth(2).click();
+    await until(async () => (await cards(P, 'ACORDEONA')) === 2, 5000, '2 tarjetas');
+    assert(/2 pzs · 7 uds/.test(await txt(P, grp('ACORDEONA') + ' [data-testid=order-counts]')), 'conteo tras quitar');
+    await P.locator(grp('ACORDEONA') + ' button[title="Asignar capa contorno a contorno"]').first().click();
+    await P.waitForSelector('text=Capas de pieza');
+    await P.click('button:has-text("Hecho")');
+    await until(async () => (await P.locator('text=Capas de pieza').count()) === 0, 5000, 'cerrar capas');
+  });
+  await test('eliminar un pedido pide confirmación en línea', async () => {
+    await P.click(grp('ACORDEONB') + ' [data-testid=order-toggle]');
+    await P.click(grp('ACORDEONB') + ' [data-testid=order-delete]');
+    const ask = await txt(P, grp('ACORDEONB') + ' [data-testid=order-delete-ask]');
+    assert(/ACORDEONB/.test(ask) && /4 piezas/.test(ask), ask);
+    await P.click(grp('ACORDEONB') + ' [data-testid=order-delete-cancel]');
+    assert((await P.locator(grp('ACORDEONB')).count()) === 1, 'cancelar no borra');
+    await P.click(grp('ACORDEONB') + ' [data-testid=order-delete]');
+    await P.click(grp('ACORDEONB') + ' [data-testid=order-delete-confirm]');
+    await until(async () => (await P.locator(grp('ACORDEONB')).count()) === 0, 5000, 'pedido quitado');
+    await P.waitForSelector('text=Pedido ACORDEONB quitado');
+  });
+  await test('las ediciones se conservan al cambiar de lote (y el lienzo no muestra otro material)', async () => {
+    await chip(P, 'Opal');
+    await until(async () => (await P.locator(grp('ACORDEONC')).count()) === 1 && (await P.locator(grp('ACORDEONA')).count()) === 0, 30000, 'lote Opal');
+    await chip(P, 'PVC');
+    await until(async () => (await P.locator(grp('ACORDEONA')).count()) === 1, 10000, 'vuelta a PVC');
+    assert((await P.locator(grp('ACORDEONB')).count()) === 0, 'el pedido quitado ha vuelto');
+    assert(/2 pzs · 7 uds/.test(await txt(P, grp('ACORDEONA') + ' [data-testid=order-counts]')), 'se perdieron las ediciones de A');
+    const chipTxt = await P.evaluate(() => [...document.querySelectorAll('#rotula-lotes-bar button')].find(b => /PVC/.test(b.textContent)).textContent);
+    assert(/2 pzs/.test(chipTxt) && /— placas/.test(chipTxt), chipTxt);
+    await until(async () => (await canvasN(P)) === 0, 10000, 'lienzo vacío');
+    await chip(P, 'Opal');
+    await until(async () => (await canvasN(P)) > 0, 30000, 'lienzo del lote Opal');
+  });
+  await test('＋ Archivo de un pedido: varias piezas entran en ESE pedido con sus copias', async () => {
+    await chip(P, 'PVC');
+    await until(async () => (await P.locator(grp('ACORDEONA')).count()) === 1, 10000, 'PVC');
+    if ((await P.getAttribute(grp('ACORDEONA'), 'data-open')) !== '1') await P.click(grp('ACORDEONA') + ' [data-testid=order-toggle]');
+    const [fc] = await Promise.all([P.waitForEvent('filechooser'), P.click(grp('ACORDEONA') + ' [data-testid=order-add-file]')]);
+    await fc.setFiles([{ name: 'extra1.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svgShapes(1)) }, { name: 'extra2.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svgShapes(1)) }]);
+    await until(async () => (await cards(P, 'ACORDEONA')) === 4, 15000, '4 tarjetas en A');
+    const last = await P.evaluate(k => [...document.querySelectorAll('[data-order-key="' + k + '"] [data-testid=piece-card]')].slice(-2).map(c => [c.querySelector('input').value, c.querySelector('[data-testid=piece-qty]').value]), 'ACORDEONA');
+    assert(JSON.stringify(last) === JSON.stringify([['ACORDEONA-1 #3', '2'], ['ACORDEONA-1 #4', '2']]), JSON.stringify(last));
+    assert((await P.locator(grp('extra1')).count()) === 0 && (await P.locator(grp('extra2')).count()) === 0, 'se crearon pedidos sueltos');
+    const [fc2] = await Promise.all([P.waitForEvent('filechooser'), P.click(grp('ACORDEONA') + ' [data-testid=order-add-file]')]);
+    await fc2.setFiles([{ name: 'ZZZZZZZZ-3-Otro.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svgShapes(1)) }]);
+    const tg = await (await P.waitForSelector('[data-testid=import-target]')).innerText();
+    assert(/ACORDEONA/.test(tg) && /×2/.test(tg), tg);
+    await P.click('button:has-text("➕ Importar")');
+    await until(async () => (await cards(P, 'ACORDEONA')) === 5, 15000, '5 tarjetas en A');
+    assert((await P.locator(grp('ZZZZZZZZ')).count()) === 0, 'el nombre del archivo ganó al pedido destino');
+  });
+  await test('un "＋ Archivo" cancelado no se cuela en la siguiente importación', async () => {
+    const [fc] = await Promise.all([P.waitForEvent('filechooser'), P.click(grp('ACORDEONA') + ' [data-testid=order-add-file]')]);
+    void fc; // se cierra el selector sin elegir nada
+    const [fc2] = await Promise.all([P.waitForEvent('filechooser'), P.click('button:has-text("📂 Archivo")')]);
+    await fc2.setFiles([{ name: 'SUELTAAA-1-x.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svgShapes(1)) }, { name: 'SUELTAAB-1-y.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svgShapes(1)) }]);
+    await P.waitForSelector(grp('SUELTAAA') + '[data-open="1"]', { timeout: 15000 });
+    await P.waitForSelector(grp('SUELTAAB') + '[data-open="1"]', { timeout: 15000 });
+    assert((await cards(P, 'ACORDEONA')) === 5, 'A recibió piezas que no eran suyas');
+  });
+  await test('＋ Pieza dentro de un pedido', async () => {
+    const nG = await P.locator('[data-testid=order-group]').count();
+    await P.click(grp('ACORDEONA') + ' [data-testid=order-add-manual]');
+    await until(async () => (await cards(P, 'ACORDEONA')) === 6, 5000, '6 tarjetas');
+    const c = await P.evaluate(k => { const cs = [...document.querySelectorAll('[data-order-key="' + k + '"] [data-testid=piece-card]')]; const x = cs[cs.length - 1]; return [x.querySelector('input').value, x.querySelector('[data-testid=piece-w]').value, x.querySelector('[data-testid=piece-h]').value, x.querySelector('[data-testid=piece-qty]').value]; }, 'ACORDEONA');
+    assert(JSON.stringify(c) === JSON.stringify(['ACORDEONA-1 #6', '200', '200', '2']), JSON.stringify(c));
+    assert((await P.locator('[data-testid=order-group]').count()) === nG, 'apareció otro grupo');
+  });
+  await test('visor: medida real, proporción, navegación por el pedido y Esc', async () => {
+    await P.locator(grp('ACORDEONA') + ' [data-testid=piece-thumb]').first().click();
+    await P.waitForSelector('[data-testid=piece-viewer]');
+    assert((await txt(P, '[data-testid=pv-counter]')).replace(/\s/g, '') === '1/6', await txt(P, '[data-testid=pv-counter]'));
+    assert(/60 × 100/.test(await txt(P, '[data-testid=pv-dims]')), await txt(P, '[data-testid=pv-dims]'));
+    if (!(await P.isChecked('[data-testid=pv-lock]'))) await P.check('[data-testid=pv-lock]');
+    const w = P.locator('[data-testid=pv-w]'); await w.click(); await w.fill('120'); await w.press('Enter');
+    await until(async () => /120 × 200/.test(await txt(P, '[data-testid=pv-dims]')), 5000, '120 × 200');
+    assert((await P.inputValue('[data-testid=pv-h]')) === '200', 'alto proporcional');
+    const card = await P.evaluate(k => { const x = document.querySelector('[data-order-key="' + k + '"] [data-testid=piece-card]'); return [x.querySelector('[data-testid=piece-w]').value, x.querySelector('[data-testid=piece-h]').value]; }, 'ACORDEONA');
+    assert(card.join() === '120,200', 'la tarjeta no refleja la medida: ' + card);
+    await P.uncheck('[data-testid=pv-lock]');
+    await w.click(); await w.fill('300'); await w.press('Enter');
+    await P.waitForSelector('[data-testid=pv-boxnote]');
+    assert(/120 × 200/.test(await txt(P, '[data-testid=pv-dims]')) && /300 × 200/.test(await txt(P, '[data-testid=pv-boxnote]')), 'sin candado, la caja crece pero el corte no');
+    await P.check('[data-testid=pv-lock]');
+    await P.click('[data-testid=pv-next]');
+    await until(async () => (await txt(P, '[data-testid=pv-counter]')).replace(/\s/g, '') === '2/6', 3000, '2/6');
+    await P.click('[data-testid=pv-dims]');
+    await P.keyboard.press('ArrowLeft');
+    await until(async () => (await txt(P, '[data-testid=pv-counter]')).replace(/\s/g, '') === '1/6', 3000, '1/6 con ←');
+    await P.keyboard.press('Escape');
+    await until(async () => (await P.locator('[data-testid=piece-viewer]').count()) === 0, 3000, 'Esc cierra');
+  });
+  await test('el teclado del visor no toca el lienzo (Supr/flechas)', async () => {
+    await chip(P, 'Opal');
+    const n = await until(async () => await canvasN(P), 30000, 'lienzo Opal');
+    await P.mouse.click(5, 5);
+    await P.keyboard.press('Control+a');
+    await P.locator(grp('ACORDEONC') + ' [data-testid=piece-thumb]').first().click();
+    await P.waitForSelector('[data-testid=piece-viewer]');
+    await P.click('[data-testid=pv-dims]');
+    for (const k of ['Delete', 'ArrowRight', 'Backspace']) await P.keyboard.press(k);
+    await P.keyboard.press('Escape'); // cierra el visor
+    await P.keyboard.press('Escape'); // y este ya llega al lienzo: deselecciona
+    await until(async () => (await canvasN(P)) > 0, 3000, 'el lienzo deselecciona con el segundo Esc');
+    assert((await canvasN(P)) === n, 'el lienzo perdió objetos: ' + (await canvasN(P)) + ' de ' + n);
+  });
+  await test('eliminar desde el visor (doble toque) y ✎ por encima del visor', async () => {
+    await chip(P, 'PVC');
+    await until(async () => (await P.locator(grp('ACORDEONA')).count()) === 1, 10000, 'PVC');
+    if ((await P.getAttribute(grp('ACORDEONA'), 'data-open')) !== '1') await P.click(grp('ACORDEONA') + ' [data-testid=order-toggle]');
+    const n0 = await cards(P, 'ACORDEONA');
+    await P.locator(grp('ACORDEONA') + ' [data-testid=piece-thumb]').nth(1).click();
+    await P.waitForSelector('[data-testid=piece-viewer]');
+    await P.click('[data-testid=pv-delete]');
+    assert(/¿Eliminar\?/.test(await txt(P, '[data-testid=pv-delete]')) && (await cards(P, 'ACORDEONA')) === n0, 'el primer toque no debe borrar');
+    await P.click('[data-testid=pv-delete]');
+    await until(async () => (await cards(P, 'ACORDEONA')) === n0 - 1, 5000, 'pieza borrada');
+    assert((await txt(P, '[data-testid=pv-counter]')).replace(/\s/g, '') === '2/' + (n0 - 1), 'el visor salta a la siguiente');
+    await P.click('[data-testid=pv-capas]');
+    await P.waitForSelector('text=Capas de pieza');
+    const top = await P.evaluate(() => { const b = [...document.querySelectorAll('button')].find(x => x.textContent === 'Hecho'); const r = b.getBoundingClientRect(); return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === b; });
+    assert(top, 'el modal de capas queda tapado');
+    await P.click('button:has-text("Hecho")');
+    assert((await P.locator('[data-testid=piece-viewer]').count()) === 1, 'cerrar capas no debe cerrar el visor');
+    await P.click('[data-testid=pv-done]');
+  });
+  await UI.close();
+
+  await test('móvil 390×844: pestaña táctil y visor completo por encima de la barra LOTES', async () => {
+    const M = await newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+    try {
+      await load(M.pg, [sOrder('MOVILAAA-1', 'MOVILAAA-1-Cliente.svg', 2, 'PVC', 3, 1)]);
+      await M.pg.waitForSelector(grp('MOVILAAA') + '[data-open="1"]', { timeout: 60000 });
+      const h = await M.pg.evaluate(() => document.querySelector('[data-testid=order-toggle]').getBoundingClientRect().height);
+      assert(h >= 44, 'cabecera de ' + h + ' px');
+      await M.pg.locator('[data-testid=piece-thumb]').first().tap();
+      await M.pg.waitForSelector('[data-testid=piece-viewer]');
+      // fin de la animación de entrada (slide-up): con el hilo ocupado por el lienzo, 400 ms no bastan
+      await M.pg.evaluate(() => Promise.all(document.querySelector('.pv-modal').getAnimations().map(a => a.finished)));
+      const r = await M.pg.evaluate(() => { const m = document.querySelector('.pv-modal').getBoundingClientRect(); const hit = id => { const b = document.querySelector('[data-testid=' + id + ']').getBoundingClientRect(); const e = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2); return !!e && !!e.closest('[data-testid=' + id + ']'); }; return { fits: m.x >= 0 && m.y >= 0 && m.right <= 390.5 && m.bottom <= 844.5, sw: document.documentElement.scrollWidth, del: hit('pv-delete'), close: hit('pv-close') }; });
+      assert(r.fits && r.sw <= 390 && r.del && r.close, JSON.stringify(r));
+    } finally { await M.close(); }
+  });
+  await test('600 piezas en 60 pedidos: solo cabeceras, sin bloquear la página', async () => {
+    const Q = await newPage();
+    try {
+      await Q.pg.evaluate(() => { window.__lt = []; try { new PerformanceObserver(l => l.getEntries().forEach(e => window.__lt.push(Math.round(e.duration)))).observe({ type: 'longtask', buffered: false }); } catch (e) {} });
+      const L = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      const files = Array.from({ length: 60 }, (_, i) => ({ name: 'PERF' + L[Math.floor(i / 26)] + L[i % 26] + '01-1-Cliente.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svgShapes(10)) }));
+      const t0 = Date.now();
+      await Q.pg.setInputFiles('input[type=file]', files);
+      await until(async () => (await Q.pg.locator('[data-testid=order-group]').count()) === 60, 20000, '60 pestañas');
+      const ms = Date.now() - t0;
+      assert((await cards(Q.pg)) === 0, 'se montaron tarjetas plegadas');
+      assert((await Q.pg.locator('[data-testid=orders-toggle-all]').count()) === 0, '"Abrir todo" con 600 piezas');
+      await Q.pg.locator('[data-testid=order-toggle]').nth(5).click();
+      await until(async () => (await cards(Q.pg)) === 10, 1500, '10 tarjetas');
+      const lt = await Q.pg.evaluate(() => window.__lt);
+      const worst = Math.max(0, ...lt);
+      console.log('      60 pestañas en ' + ms + ' ms · tarea larga máx ' + worst + ' ms');
+      assert(ms < 20000, ms + ' ms');
+      assert(worst < 1500, 'tarea larga de ' + worst + ' ms');
+    } finally { await Q.close(); }
+  });
+  await test('paginado de 50 y visor que recorre todo el pedido', async () => {
+    const Q = await newPage();
+    try {
+      await Q.pg.setInputFiles('input[type=file]', [{ name: 'PAGINAAA-1-x.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svgShapes(55)) }, { name: 'PAGINAAB-1-y.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svgShapes(1)) }]);
+      await Q.pg.waitForSelector(grp('PAGINAAA') + '[data-open="1"]', { timeout: 20000 });
+      assert((await cards(Q.pg, 'PAGINAAA')) === 50, 'deben verse 50');
+      assert(/5 restantes/.test(await txt(Q.pg, grp('PAGINAAA') + ' [data-testid=order-show-all]')), 'botón de restantes');
+      await Q.pg.locator(grp('PAGINAAA') + ' [data-testid=piece-thumb]').first().click();
+      assert((await txt(Q.pg, '[data-testid=pv-counter]')).replace(/\s/g, '') === '1/55', 'el visor no recorre todo el pedido');
+      await Q.pg.click('[data-testid=pv-close]');
+      await Q.pg.click(grp('PAGINAAA') + ' [data-testid=order-show-all]');
+      assert((await cards(Q.pg, 'PAGINAAA')) === 55, 'Mostrar las restantes');
+    } finally { await Q.close(); }
+  });
+  await test('importación suelta: pestaña por archivo y renombrar no la saca de su pedido', async () => {
+    const Q = await newPage();
+    try {
+      await Q.pg.setInputFiles('input[type=file]', [{ name: 'logo.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svgShapes(2)) }]);
+      await Q.pg.click('button:has-text("➕ Importar")');
+      await Q.pg.waitForSelector(grp('logo') + '[data-open="1"]', { timeout: 15000 });
+      await Q.pg.setInputFiles('input[type=file]', [{ name: 'otro.svg', mimeType: 'image/svg+xml', buffer: Buffer.from(svgShapes(1)) }]);
+      await Q.pg.click('button:has-text("➕ Importar")');
+      await Q.pg.waitForSelector(grp('otro') + '[data-open="1"]', { timeout: 15000 });
+      assert((await Q.pg.getAttribute(grp('logo'), 'data-open')) === '1', 'logo se plegó al llegar otro');
+      const inp = Q.pg.locator(grp('logo') + ' [data-testid=piece-card] input').first();
+      await inp.click(); await Q.pg.keyboard.press('Control+a'); await Q.pg.keyboard.type('Letra A');
+      const st = await Q.pg.evaluate(() => [document.activeElement.value, !!document.activeElement.closest('[data-order-key="logo"]'), !!document.querySelector('[data-order-key="Letra A"]')]);
+      assert(st[0] === 'Letra A' && st[1] && !st[2], JSON.stringify(st));
+    } finally { await Q.close(); }
+  });
+
   if (PDF_DIR) {
     console.log('\nPDF reales (' + PDF_DIR + ')');
     const files = fs.readdirSync(PDF_DIR).filter(f => /\.(pdf|ai)$/i.test(f)).sort();

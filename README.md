@@ -86,6 +86,32 @@ Lo que sale del nesting (lienzo, DXF, SVG y PDF) queda maquetado como se hace a 
   no comparten placa.
 - La **cantidad** de un pedido multiplica TODAS sus piezas (antes solo la primera).
 
+## Piezas a cortar por pedido (v101)
+
+La lista «PIEZAS A CORTAR» se agrupa por pedido en pestañas plegables:
+
+- **Cabecera** (un toque solo pliega/despliega): color del pedido, código, cliente (sacado del
+  nombre del archivo), `N pzs · U uds` y, tras el nesting, en qué placa quedó (`▦ Placa 1`) o
+  cuántas unidades no entraron (`⚠ N sin colocar`). `⚑` si alguna pieza está fijada a placa.
+  Con un solo pedido se ve abierto; con varios, plegados. «Abrir todo / Cerrar todo» arriba.
+- **Abierta**: las tarjetas de siempre (nombre, medidas, cantidad, capa, ✎ contornos, placa fija,
+  quitar). Si el pedido llega en varias líneas (`BDKGQVISY-1`, `BDKGQVISY-2`) va una subcabecera
+  por línea. Se montan 50 tarjetas y luego «Mostrar las N restantes»; plegada no monta ninguna,
+  así un lote de 600 piezas solo pinta cabeceras.
+- **＋ Archivo / ＋ Pieza** dentro del pedido: lo nuevo entra en ESE pedido, detrás de sus piezas,
+  con la referencia de su primera línea (manda sobre el nombre del archivo), numeración
+  `<línea> #k` a continuación, cantidad × copias del pedido y su material. Las piezas sin
+  código van a «Sin pedido», al final.
+- **Eliminar pedido** pide confirmación en línea («Sí, quitar»).
+- **Visor de pieza** (miniatura o 🔍): la pieza en grande con su **medida real de corte** (el
+  dibujo se encaja sin deformarse en la caja `w×h`; si la caja no guarda la proporción lo
+  avisa), ancho/alto con proporción bloqueada, cantidad, capa, contorno a contorno, placa fija,
+  eliminar (doble toque) y ‹ › o ←/→ para recorrer todo el pedido. Mientras está abierto el
+  teclado no llega al lienzo (Supr/flechas no tocan la selección). En móvil ocupa la pantalla.
+- **Cambiar de lote conserva lo editado** (piezas y nesting del lote que se deja). Un lote sin
+  nesting deja el lienzo vacío en lugar de mostrar el anidado de otro material; no se puede
+  cambiar de lote mientras se calcula un nesting.
+
 ## Tests
 
 ```bash
@@ -96,7 +122,8 @@ node tests/run-tests.js [carpeta-con-pdfs-del-panel]
 Abre `rotula-nest.html` en Chromium y comprueba con archivos sintéticos (PDF, DXF y SVG que
 genera el propio test), con los 6 pedidos SVG reales que trae la demo y, si se pasa, con una
 carpeta de PDF reales: tamaño exacto de la geometría, espejo, cantidades, nesting sin solapes y
-dentro de placa, bloques por pedido, rótulos fuera de la placa, capas del DXF y el flujo
+dentro de placa, bloques por pedido, rótulos fuera de la placa, capas del DXF, la lista por
+pedidos (pestañas, añadir/quitar, visor, cambio de lote, móvil, 600 piezas) y el flujo
 completo panel → nesting → lienzo → exportar. `ROTULA_HTML=rotula-nest-demo.html` prueba la demo.
 pdf.js se descarga de cdnjs la primera vez (hace falta red).
 

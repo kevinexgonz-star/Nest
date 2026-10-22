@@ -1,7 +1,19 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v100 — Nesting · Editor · Capas                 ║
+     ║  ROTULA NEST v101 — Nesting · Editor · Capas                 ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v101: PIEZAS A CORTAR POR PEDIDO. La lista se agrupa en     ║
+     ║  pestanas plegables, una por pedido: color, codigo, cliente, ║
+     ║  piezas/uds y placa donde quedo. Abierta muestra sus piezas  ║
+     ║  con las funciones de siempre, "+ Archivo" y "+ Pieza" que   ║
+     ║  entran en ESE pedido (heredan linea, copias y material) y   ║
+     ║  "Eliminar pedido" con confirmacion. Visor de pieza          ║
+     ║  (miniatura o lupa): en grande, con su medida REAL de corte, ║
+     ║  proporcion bloqueada, cantidad, capa, contornos, placa      ║
+     ║  fija, eliminar y </> para recorrer el pedido. Cambiar de    ║
+     ║  lote ya no pierde lo editado, y un lote sin nesting deja el ║
+     ║  lienzo vacio (no el de otro material). Lotes grandes: solo  ║
+     ║  cabeceras y paginado de 50.                                 ║
      ║  v100: MAQUETACION COMO EN VCARVE. (1) Cada pedido se anida  ║
      ║  en su BLOQUE compacto (motor raster de forma real, giros    ║
      ║  exactos en celdas) y su codigo se rotula FUERA de la placa  ║
@@ -8827,6 +8839,20 @@ return ret;
   .btn-glow:hover { opacity:.9; }
   .card-hover { transition: border-color .15s; }
   .card-hover:hover { border-color: #ccc !important; }
+  /* v101: pestañas de pedido y visor de pieza */
+  .og-head:hover { border-color: #ccc !important; }
+  .og-head:focus-visible, .og button:focus-visible, .pv-modal button:focus-visible { outline: 2px solid #E6007E; outline-offset: 1px; }
+  .og-chev { display: inline-block; transition: transform .15s; color: #999; }
+  .og-open .og-chev { transform: rotate(90deg); }
+  @media (max-width: 640px) {
+    .og-head { min-height: 52px !important; }
+    .og-tools button { min-height: 40px !important; }
+    .pv-overlay { padding: 0 !important; }
+    .pv-modal { width: 100vw !important; height: 100dvh !important; max-height: 100dvh !important; border-radius: 0 !important; }
+    .pv-body { flex-direction: column !important; }
+    .pv-side { width: 100% !important; }
+  }
+  @media (prefers-reduced-motion: reduce) { .og-chev { transition: none; } }
   /* v90: en pantalla completa NATIVA el lienzo llena la pantalla (gana al estilo inline por !important) */
   .ed-canvas:fullscreen { width:100vw !important; height:100vh !important; border-radius:0 !important; border:none !important; background:#f3f4f6; }
   .ed-canvas:-webkit-full-screen { width:100vw !important; height:100vh !important; border-radius:0 !important; border:none !important; background:#f3f4f6; }
@@ -9068,7 +9094,8 @@ function orderToPieces(o, parsed, matName) {
     quantity: Math.max(1, p.quantity || 1) * copies,
     forceSheet: null,
     mat: matName,
-    matColor: orderMatColor(o) || null
+    matColor: orderMatColor(o) || null,
+    copies // v101: copias del pedido; las hereda lo que se añada a esa línea desde la lista
   }));
 }
 /* v100: color de la plancha del pedido ("NEGRO" en "Plancha De Pvc 3mm Pvc Negro"). El
@@ -9126,6 +9153,116 @@ const orderColorOf = (p, map) => {
   const r = colorKeyOf(p);
   return (map && map.get(r)) || srcColorFor(r) || srcColorFor(p && p.fileName);
 };
+/* ── v101: PEDIDOS EN LA LISTA "PIEZAS A CORTAR" ─────────────────────────────────────
+   La lista se agrupa por pedido en pestañas plegables. groupKeyOf es orderKeyOf SIN mirar la
+   etiqueta: renombrar una pieza ("Pieza 1" → "Letra A") no la saca de su pestaña ni le quita
+   el foco mientras se escribe. Motor, colores y DXF siguen con orderKeyOf. */
+const ORDER_PAGE = 50; // tarjetas que se montan al abrir un pedido (luego "Mostrar las N restantes")
+const groupKeyOf = p => p && (p.ref || p.fileName) ? orderCodeOf(refOf({ ref: p.ref, fileName: p.fileName })) : "";
+// línea del pedido ("BDKGQVISY-1"): un mismo código puede llegar en varias líneas/archivos
+const lineKeyOf = p => p && (p.ref || p.fileName) ? refOf({ ref: p.ref, fileName: p.fileName }) : "";
+// cliente desde el nombre de archivo del panel: "BDKGQVISY-1-Herminio-Lopez.pdf" → "Herminio Lopez"
+function orderClientOf(fileName) {
+  const fn = String(fileName || "").replace(/\.[^.]+$/, "");
+  const m = /^[A-Z0-9]{6,}-\d{1,3}[-_ ]+(.+)$/i.exec(fn);
+  return m ? m[1].replace(/_+\d+_*$/, "").replace(/[-_]+/g, " ").trim() : "";
+}
+/* Grupos por pedido en orden de primera aparición ("Sin pedido" al final). idx = índice en
+   pieces (la tarjeta lo usa para su color de reserva); li = línea del pedido. */
+function buildOrderGroups(pieces) {
+  const m = new Map();
+  (pieces || []).forEach((p, idx) => {
+    const key = groupKeyOf(p);
+    let g = m.get(key);
+    if (!g) {
+      g = { key, title: key || "Sin pedido", loose: !key, items: [], lines: [], lineIdx: new Map(), nPieces: 0, units: 0, client: "", files: new Set(), forced: 0 };
+      m.set(key, g);
+    }
+    let li = -1;
+    if (key) {
+      const lk = lineKeyOf(p);
+      if (!g.lineIdx.has(lk)) { g.lineIdx.set(lk, g.lines.length); g.lines.push({ key: lk, n: 0 }); }
+      li = g.lineIdx.get(lk);
+      g.lines[li].n++;
+    }
+    g.items.push({ p, idx, li });
+    g.nPieces++;
+    g.units += Math.max(1, Math.round(+p.quantity || 1));
+    if (!g.client && p.fileName) g.client = orderClientOf(p.fileName);
+    if (p.fileName) g.files.add(p.fileName);
+    if (p.forceSheet != null) g.forced++;
+  });
+  const out = [];
+  let loose = null;
+  m.forEach(g => {
+    if (g.lines.length > 1) g.items.sort((a, b) => a.li - b.li || a.idx - b.idx);
+    g.nFiles = g.files.size;
+    delete g.files;
+    delete g.lineIdx;
+    if (g.loose) loose = g; else out.push(g);
+  });
+  if (loose) out.push(loose);
+  return out;
+}
+/* Dónde quedó cada pedido en el nesting: clave → { sheets: [índices de placa], placed }. */
+function orderPlacement(nest) {
+  const m = new Map();
+  (nest || []).forEach((sh, si) => (sh.pieces || []).forEach(p => {
+    const k = groupKeyOf(p);
+    const e = m.get(k) || { sheets: [], placed: 0 };
+    if (e.sheets.indexOf(si) < 0) e.sheets.push(si);
+    e.placed++;
+    m.set(k, e);
+  }));
+  return m;
+}
+/* Inserta `add` detrás de la última pieza del pedido `key` (al final si no existe). Pura. */
+function insertAfterGroup(list, key, add) {
+  let i = -1;
+  for (let k = 0; k < list.length; k++) if (groupKeyOf(list[k]) === key) i = k;
+  return i < 0 ? [...list, ...add] : [...list.slice(0, i + 1), ...add, ...list.slice(i + 1)];
+}
+/* Destino para "añadir a este pedido": su primera línea, con sus copias y su material. */
+function orderTargetOf(g) {
+  if (!g || g.loose) return null;
+  const ln = g.lines.length ? g.lines[0].key : g.key;
+  const src = (g.items.find(it => lineKeyOf(it.p) === ln) || g.items[0]).p;
+  return { key: g.key, ref: ln || g.key, copies: Math.max(1, Math.round(+src.copies || 1)), mat: src.mat || null, matColor: src.matColor || null };
+}
+/* Sella en piezas nuevas el pedido destino: ref de la línea (manda sobre el nombre del
+   archivo), numeración "<línea> #k" a continuación, cantidad × copias del pedido, material.
+   k sigue al mayor de (piezas de la línea, último "#k" usado): tras borrar una no se repite. */
+function applyOrderTarget(newPieces, t, existing) {
+  const pre = t.ref + " #";
+  let n0 = 0, top = 0;
+  (existing || []).forEach(p => {
+    if (lineKeyOf(p) !== t.ref) return;
+    n0++;
+    const l = String(p.label || "");
+    if (l.indexOf(pre) === 0) top = Math.max(top, parseInt(l.slice(pre.length), 10) || 0);
+  });
+  n0 = Math.max(n0, top);
+  return newPieces.map((p, i) => ({
+    ...p,
+    ref: t.ref,
+    label: t.ref + " #" + (n0 + i + 1),
+    quantity: Math.max(1, Math.round(+p.quantity || 1)) * t.copies,
+    copies: t.copies,
+    mat: t.mat,
+    matColor: t.matColor
+  }));
+}
+/* Medida REAL de corte: el dibujo se encaja en la caja w×h con "meet" (igual que
+   pieceToPolylinesMM), así que si w y h no guardan la proporción del dibujo, corta menos. */
+function pieceRealSize(p) {
+  const vb = String(p && p.viewBox || "").split(/[\s,]+/).map(Number);
+  if (p && p.svgContent && vb[2] > 0 && vb[3] > 0) {
+    const f = Math.min(p.w / vb[2], p.h / vb[3]);
+    return { w: vb[2] * f, h: vb[3] * f, ratio: vb[3] / vb[2] };
+  }
+  return { w: +(p && p.w) || 0, h: +(p && p.h) || 0, ratio: p && p.w > 0 ? p.h / p.w : 1 };
+}
+const fmtMM = v => (Math.round(v * 10) / 10).toLocaleString("es-ES", { maximumFractionDigits: 1 });
 /* Rótulo de referencia dentro de la pieza: decide el cuerpo de letra (mm) que cabe en el
    hueco w×h de la placa. Devuelve null si la pieza es tan pequeña que el texto sería
    ilegible. Lo comparten el lienzo y la exportación PDF, así la vista previa que ve el
@@ -14741,6 +14878,14 @@ function VectorEditor({
   }, [plateW, plateH]);
   useEffect(() => {
     if (!inbox || !inbox.seq) return;
+    if (inbox.type === "clear") {
+      // v101: el lote activo no tiene nesting → lienzo vacío (no el anidado de otro lote)
+      setObjects([]);
+      setSel([]);
+      setExpSheet(-1);
+      setEdSheets([{ x0: 0, y0: 0, w: plateW, h: plateH }]);
+      return;
+    }
     if (inbox.type === "placed" && inbox.sheets && inbox.sheets.length) {
       let cancel = false;
       const auto = !!inbox.auto;
@@ -17023,17 +17168,32 @@ function App() {
     LS.set("np-capas-v1", c);
   };
   const [capaModalId, setCapaModalId] = useState(null);
+  /* v101: lista por pedidos. orderOpen[clave] = abierta/cerrada (lo que el operario toca);
+     orderShowAll[clave] = sin paginar; viewerId = pieza abierta en el visor. */
+  const [orderOpen, setOrderOpen] = useState({});
+  const [orderShowAll, setOrderShowAll] = useState({});
+  const [viewerId, setViewerId] = useState(null);
+  const _importTargetRef = useRef(null); // pedido destino de "＋ Archivo" hasta que llega el archivo
+  const activateBatchRef = useRef(null); // la barra LOTES (DOM) llama siempre al _activateBatch del último render
+  const _orderGroups = React.useMemo(() => buildOrderGroups(pieces), [pieces]);
+  const _orderPlace = React.useMemo(() => orderPlacement(nestResult), [nestResult]);
+  // sin decisión del operario: un único pedido se ve abierto; varios, plegados
+  const isOrderOpen = g => g.key in orderOpen ? !!orderOpen[g.key] : _orderGroups.length === 1;
   const [capasAdvOpen, setCapasAdvOpen] = useState(false);
   const [editorMode, setEditorMode] = useState(true);
   const [editorPrepping, setEditorPrepping] = useState(false);
   const _pendingPiecesRef = useRef(null); // demo-7: lista de piezas del intake diferida hasta acabar el lienzo
+  const _listTokenRef = useRef(0); // v101: invalida la lista diferida de un lote que se ha dejado
   const handleEditorReady = useCallback(meta => {
     setEditorPrepping(false);
     if (meta && meta.auto && meta.ok) setEditorMode(true);
     if (_pendingPiecesRef.current) {
       const pp = _pendingPiecesRef.current;
       _pendingPiecesRef.current = null;
-      setTimeout(() => setPieces(pp), 60);
+      const _tok = _listTokenRef.current; // v101: si entretanto se cambió de lote, esta lista ya no vale
+      setTimeout(() => {
+        if (_tok === _listTokenRef.current) setPieces(pp);
+      }, 60);
     }
   }, []);
   const [editorSurface, setEditorSurface] = useState("plate");
@@ -17274,7 +17434,7 @@ function App() {
   const saveImportUnit = u => { setImportUnit(u); LS.set('np-pdf-unit-v2', u); };
   // Escala efectiva (mm por unidad) editable en el modal de importación.
   const [importScale, setImportScale] = useState(0);
-  const processFile = async (data, name) => {
+  const processFile = async (data, name, target) => {
     const ext = name.toLowerCase();
     const isPdf = ext.endsWith('.pdf') || ext.endsWith('.ai');
     const isDxf = ext.endsWith('.dxf');
@@ -17300,7 +17460,8 @@ function App() {
           name,
           data,
           isPdf,
-          isDxf
+          isDxf,
+          target: target || null // v101: pedido al que se añadirá (null = importación normal)
         });
         /* Escala inicial: para PDF/AI aplica la unidad recordada (mm/cm/m); resto 1:1.
            v97: la unidad recordada pasa por la guarda de escala — si con ella el pliego no
@@ -17333,16 +17494,22 @@ function App() {
       if (importInfo.isPdf) re = await parsePDF(importInfo.data, customScale);else if (importInfo.isDxf) re = parseDXF(importInfo.data, customScale);else re = parseSVG(importInfo.data, customScale);
       pcs = re.pieces;
     }
-    const mapped = pcs.map(p => ({
+    let mapped = pcs.map(p => ({
       ...p,
       id: mkId('p-'),
       fileName: importInfo.name,
       forceSheet: null
     }));
-    const merged = [...pieces, ...mapped];
+    // v101: "＋ Archivo" de un pedido → las piezas entran en ESE pedido, detrás de las suyas
+    const tg = importInfo.target || null;
+    if (tg) mapped = applyOrderTarget(mapped, tg, pieces);
+    const merged = tg ? insertAfterGroup(pieces, tg.key, mapped) : [...pieces, ...mapped];
     setPieces(merged);
     setNestResult(null);
     setImportInfo(null);
+    const _ks = [...new Set(mapped.map(groupKeyOf))];
+    openGroups(tg ? [tg.key] : _ks.length <= 3 ? _ks : [], tg ? tg.key : null);
+    const _added = tg ? pcs.length + " pieza(s) a\xF1adidas al pedido " + tg.key + (tg.copies > 1 ? " (\xD7" + tg.copies + ")" : "") : pcs.length + " piezas importadas";
     if (mode === 'edit') {
       setTab('nesting');
       setEditorMode(true);
@@ -17359,11 +17526,11 @@ function App() {
       });
     } else if (mode === 'nest') {
       setTab('nesting');
-      showToast(pcs.length + " piezas importadas");
+      showToast(_added);
       if (autoNest) runNesting(merged);
     } else {
       setTab('nesting');
-      showToast(pcs.length + " piezas importadas");
+      showToast(_added);
     }
   };
   const VALID_EXT = [".svg", ".dxf", ".pdf", ".ai"];
@@ -17382,7 +17549,7 @@ function App() {
     if (n.endsWith(".dxf")) return parseDXF(data);
     return parseSVG(data);
   };
-  const importFilesDirect = async fileList => {
+  const importFilesDirect = async (fileList, target) => {
     const valid = fileList.filter(isValidFile);
     if (!valid.length) {
       showToast("Ningún archivo válido (SVG, DXF, PDF, AI)", "error");
@@ -17433,19 +17600,25 @@ function App() {
       showToast("No se encontraron piezas en los archivos", "error");
       return;
     }
-    setPieces(prev => [...prev, ...allNew]);
+    // v101: con destino (＋ Archivo de un pedido) entran en ese pedido, detrás de sus piezas
+    setPieces(prev => target ? insertAfterGroup(prev, target.key, applyOrderTarget(allNew, target, prev)) : [...prev, ...allNew]);
+    const _ks = [...new Set(allNew.map(groupKeyOf))];
+    openGroups(target ? [target.key] : _ks.length <= 3 ? _ks : [], target ? target.key : null);
     setNestResult(null);
     setTab('nesting');
-    showToast(allNew.length + " pieza(s) de " + okFiles + " archivo(s)" + (failFiles ? " · " + failFiles + " sin piezas" : ""));
+    showToast(target ? allNew.length + " pieza(s) a\xF1adidas al pedido " + target.key + (target.copies > 1 ? " (\xD7" + target.copies + ")" : "") : allNew.length + " pieza(s) de " + okFiles + " archivo(s)" + (failFiles ? " · " + failFiles + " sin piezas" : ""));
   };
   const handleFiles = e => {
+    // v101: el destino (pedido) se consume aquí; un selector cancelado no lo deja colgado
+    const target = _importTargetRef.current;
+    _importTargetRef.current = null;
     const files = Array.from(e.target.files).filter(isValidFile);
     if (fileRef.current) fileRef.current.value = "";
     if (!files.length) return;
     if (files.length === 1) {
-      readFileAsync(files[0]).then(data => processFile(data, files[0].name)).catch(err => showToast(err.message, "error"));
+      readFileAsync(files[0]).then(data => processFile(data, files[0].name, target)).catch(err => showToast(err.message, "error"));
     } else {
-      importFilesDirect(files);
+      importFilesDirect(files, target);
     }
   };
   const onDragOver = e => {
@@ -17479,6 +17652,9 @@ function App() {
     }
   };
   const loadDemo = () => {
+    setOrderOpen({}); // v101
+    setOrderShowAll({});
+    setViewerId(null);
     setPieces(DEMO_PIECES.map(p => ({
       ...p,
       id: 'demo-' + Date.now() + '-' + p.id
@@ -17498,6 +17674,7 @@ function App() {
       forceSheet: null
     }]);
     setNestResult(null);
+    openGroups(['']); // v101: se ve en "Sin pedido"
   };
   const updatePiece = (id, f, v) => {
     setPieces(p => p.map(x => x.id === id ? {
@@ -17509,6 +17686,60 @@ function App() {
   const removePiece = id => {
     setPieces(p => p.filter(x => x.id !== id));
     setNestResult(null);
+  };
+  /* v101: varias propiedades en UN solo setPieces (ancho y alto con la proporción bloqueada
+     del visor): con ReactDOM.render los setState fuera de eventos de React no se agrupan. */
+  const updatePieceFields = (id, obj) => {
+    setPieces(ps => ps.map(x => x.id === id ? { ...x, ...obj } : x));
+    setNestResult(null);
+  };
+  const toggleOrder = g => {
+    const v = !isOrderOpen(g);
+    setOrderOpen(o => ({ ...o, [g.key]: v }));
+  };
+  const setAllOrders = v => setOrderOpen(Object.fromEntries(_orderGroups.map(g => [g.key, v])));
+  // Abre esos pedidos. Si hasta ahora había un solo grupo (abierto por defecto), lo deja
+  // abierto de verdad antes de que aparezca otro y lo pliegue la regla por defecto.
+  const openGroups = (keys, showAllKey) => {
+    setOrderOpen(o => {
+      const n = { ...o };
+      if (_orderGroups.length === 1 && !(_orderGroups[0].key in n)) n[_orderGroups[0].key] = true;
+      (keys || []).forEach(k => { n[k] = true; });
+      return n;
+    });
+    if (showAllKey != null) setOrderShowAll(s => ({ ...s, [showAllKey]: true }));
+  };
+  const openFilePicker = target => {
+    _importTargetRef.current = target || null;
+    if (fileRef.current) fileRef.current.click();
+  };
+  const addManualToOrder = g => {
+    if (!g || g.loose) {
+      addManual();
+      return;
+    }
+    const t = orderTargetOf(g);
+    const np = applyOrderTarget([{ id: mkId('m-'), label: '', w: 200, h: 200, quantity: 1, manual: true, capa: 'corte', forceSheet: null }], t, pieces)[0];
+    setPieces(ps => insertAfterGroup(ps, g.key, [np]));
+    setNestResult(null);
+    openGroups([g.key], g.key);
+  };
+  const removeOrder = key => {
+    const g = _orderGroups.find(x => x.key === key);
+    const inG = id => {
+      const pc = id && pieces.find(x => x.id === id);
+      return !!pc && groupKeyOf(pc) === key;
+    };
+    if (inG(viewerId)) setViewerId(null);
+    if (inG(capaModalId)) setCapaModalId(null);
+    setPieces(ps => ps.filter(p => groupKeyOf(p) !== key));
+    setNestResult(null);
+    setOrderOpen(o => {
+      const n = { ...o };
+      delete n[key];
+      return n;
+    });
+    showToast((key ? 'Pedido ' + key : 'Piezas sin pedido') + ' quitado de la lista \xB7 ' + (g ? g.nPieces : 0) + ' pieza(s)');
   };
   const [nesting, setNesting] = useState(false);
   const nestCancelRef = useRef(null); // v87: rejecter activo del nesting en curso (para Cancelar)
@@ -17807,7 +18038,23 @@ function App() {
     return materials.findIndex(m => m.name.trim().toLowerCase() === n);
   };
   const _activateBatch = (idx, list) => {
-    const bs = list || batches;
+    // v101: cambiar de lote GUARDA la lista editada y su nesting en el lote que se deja (antes
+    // al volver se recargaban las piezas originales del panel y se perdían las ediciones).
+    if (!list && nesting) {
+      showToast("Espera a que termine el nesting para cambiar de lote", "error");
+      return;
+    }
+    let bs = list || batches;
+    if (!list && bs.length && !_pendingPiecesRef.current) {
+      const cur = bs[activeBatchIdx];
+      if (cur && (cur.pieces !== pieces || (cur.result || null) !== (nestResult || null))) {
+        bs = bs.map((x, i) => i === activeBatchIdx ? { ...x, pieces, result: nestResult } : x);
+        setBatches(bs);
+      }
+    }
+    _pendingPiecesRef.current = null;
+    _listTokenRef.current++;
+    setViewerId(null);
     const b = bs[idx];
     if (!b) return;
     // demo-9: pop-up "Cargando" al instante de pulsar el chip (antes de montar el lienzo).
@@ -17843,10 +18090,18 @@ function App() {
         sheets: b.result,
         auto: false
       });
+    } else {
+      // v101: lote sin nesting (editado o fallido) → el lienzo no puede seguir mostrando el
+      // anidado de OTRO material (y exportarlo). setEditorPrepping(false): el 'placed' que
+      // estuviera en curso se cancela con este inbox y nunca llamaría a onReady.
+      setEditorPrepping(false);
+      setEditorInbox({ seq: Date.now(), type: "clear" });
+      if (!list && b.pieces.length) showToast("Lote " + b.matName + ": " + b.pieces.length + " pieza(s) sin anidar \xB7 pulsa CALCULAR NESTING");
     }
     setTab("nesting");
     setEditorMode(false);
   };
+  activateBatchRef.current = _activateBatch;
   const ingestOrders = async orders => {
     if (!orders || !orders.length) return;
     reportProgress(2, "Recibiendo pedidos…");
@@ -17911,6 +18166,8 @@ function App() {
     }
     setBatches(batchList);
     reportProgress(null);
+    setOrderOpen({}); // v101: pedidos nuevos, plegado nuevo
+    setOrderShowAll({});
     _activateBatch(0, batchList);
     const msg = batchList.map(b => b.matName + " (" + b.pieces.length + ")").join(" · ");
     showToast("Pedidos recibidos → " + msg + (failed.length ? " · " + failed.length + " sin geometría" : ""));
@@ -17974,7 +18231,7 @@ function App() {
       const placas = b.result ? b.result.length : "—";
       chip.textContent = b.matName + " · " + (b.thk || "?") + "mm · " + b.pieces.length + " pzs · " + placas + " placa" + (placas === 1 ? "" : "s");
       chip.style.cssText = "cursor:pointer;border:1px solid " + (i === activeBatchIdx ? "#E6007E" : "#ddd") + ";background:" + (i === activeBatchIdx ? "#E6007E" : "#f4f5f7") + ";color:" + (i === activeBatchIdx ? "#fff" : "#111") + ";border-radius:8px;padding:9px 16px;font:600 14px Inter,system-ui,sans-serif;";
-      chip.onclick = () => _activateBatch(i);
+      chip.onclick = () => activateBatchRef.current && activateBatchRef.current(i); // v101: sin closure obsoleto
       bar.appendChild(chip);
     });
     const note = document.createElement("span");
@@ -18113,15 +18370,52 @@ function App() {
       fontSize: 13.5,
       cursor: cancelling ? "default" : "pointer"
     }
-  }, cancelling ? "Cancelando\u2026" : "Cancelar")))), capaModalId && (() => {
+  }, cancelling ? "Cancelando\u2026" : "Cancelar")))), viewerId && (() => {
+    // v101: visor de pieza, en portal a <body> (por encima de la barra LOTES)
+    const pc = pieces.find(x => x.id === viewerId);
+    if (!pc) return null;
+    const g = _orderGroups.find(x => x.key === groupKeyOf(pc));
+    const ids = g ? g.items.map(it => it.p.id) : [pc.id];
+    const i = ids.indexOf(pc.id);
+    return ReactDOM.createPortal(React.createElement(PieceViewerModal, {
+      key: "pv",
+      piece: pc,
+      pos: i,
+      total: ids.length,
+      title: g && !g.loose ? lineKeyOf(pc) || g.key : "Sin pedido",
+      client: g ? g.client : "",
+      color: g && !g.loose ? orderColorOf({ ref: g.key }, _pieceColorMap) : "#bbbbbb",
+      capas: capas,
+      nSheets: nestResult ? nestResult.length : 0,
+      placements: nestResult ? nestResult.map((sh, si) => ({ si, n: sh.pieces.filter(q => q.id === pc.id).length })).filter(x => x.n) : null,
+      capaOpen: !!capaModalId,
+      onField: updatePiece,
+      onFields: updatePieceFields,
+      onAssignCapa: assignCapaPiece,
+      onOpenCapas: id => setCapaModalId(id),
+      onPrev: () => {
+        if (i > 0) setViewerId(ids[i - 1]);
+      },
+      onNext: () => {
+        if (i < ids.length - 1) setViewerId(ids[i + 1]);
+      },
+      onRemove: () => {
+        const nx = ids[i + 1] || ids[i - 1] || null;
+        removePiece(pc.id);
+        setViewerId(nx);
+      },
+      onClose: () => setViewerId(null)
+    }), document.body);
+  })(), capaModalId && (() => {
     const pc = pieces.find(x => x.id === capaModalId);
-    return pc ? React.createElement(CapaEditorModal, {
+    // v101: en portal a <body>, por encima del visor y de la barra LOTES
+    return pc ? ReactDOM.createPortal(React.createElement(CapaEditorModal, {
       piece: pc,
       capas: capas,
       onAssignEls: assignCapaEls,
       onAssignAll: assignCapaPiece,
       onClose: () => setCapaModalId(null)
-    }) : null;
+    }), document.body) : null;
   })(), toast && React.createElement("div", {
     style: {
       position: "fixed",
@@ -18151,12 +18445,13 @@ function App() {
       opacity: 0,
       pointerEvents: "none"
     }
-  }), importInfo && React.createElement("div", {
+  }), importInfo && ReactDOM.createPortal(React.createElement("div", {
+    // v101: en portal a <body> (dentro de App quedaba bajo la barra LOTES y anclado a su caja)
     style: {
       position: "fixed",
       inset: 0,
       background: "#00000033",
-      zIndex: 10000,
+      zIndex: 100001,
       display: "flex",
       alignItems: "center",
       justifyContent: "center",
@@ -18184,7 +18479,15 @@ function App() {
       fontSize: 16,
       fontFamily: "'Inter',sans-serif"
     }
-  }, "Importar archivo"), React.createElement("div", {
+  }, "Importar archivo"), importInfo.target && React.createElement("div", {
+    "data-testid": "import-target",
+    style: {
+      margin: "-8px 0 12px",
+      fontSize: 12,
+      fontWeight: 600,
+      color: "#E6007E"
+    }
+  }, "\u2192 Se a\xF1adir\xE1 al pedido " + importInfo.target.key + " \xB7 l\xEDnea " + importInfo.target.ref + (importInfo.target.copies > 1 ? " \xB7 \xD7" + importInfo.target.copies + " copias" : "")), React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "1fr 1fr",
@@ -18410,7 +18713,7 @@ function App() {
     style: {
       padding: "10px 16px"
     }
-  }, "Cancelar")))), React.createElement("div", {
+  }, "Cancelar")))), document.body), React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -18460,7 +18763,7 @@ function App() {
     style: {
       color: "#E6007E"
     }
-  }, "v100"))))), tab === "nesting" && React.createElement("div", {
+  }, "v101"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",
@@ -18573,6 +18876,7 @@ function App() {
       display: "flex",
       justifyContent: "space-between",
       alignItems: "center",
+      gap: 8,
       padding: "12px 14px",
       borderBottom: "1px solid #eee"
     }
@@ -18580,15 +18884,58 @@ function App() {
     style: {
       fontSize: 11,
       color: "#888",
-      fontWeight: 600
+      fontWeight: 600,
+      minWidth: 0
     }
-  }, "PIEZAS A CORTAR"), pieces.length > 0 && React.createElement(Btn, {
+  }, "PIEZAS A CORTAR", pieces.length > 0 && React.createElement("span", {
+    "data-testid": "orders-summary",
+    style: {
+      display: "block",
+      fontWeight: 400,
+      color: "#aaa",
+      marginTop: 2
+    }
+  }, (() => {
+    // v101: resumen de la lista por pedidos
+    const nOrd = _orderGroups.filter(g => !g.loose).length;
+    const loose = _orderGroups.find(g => g.loose);
+    const uds = pieces.reduce((a, p) => a + Math.max(1, Math.round(+p.quantity || 1)), 0);
+    return [nOrd ? nOrd + " pedido" + (nOrd === 1 ? "" : "s") : null, pieces.length + " pzs", uds + " uds", loose && nOrd ? loose.nPieces + " sin pedido" : null].filter(Boolean).join(" \xB7 ");
+  })())), pieces.length > 0 && React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      alignItems: "center"
+    }
+  }, (() => {
+    const anyOpen = _orderGroups.some(isOrderOpen);
+    return _orderGroups.length >= 2 && (anyOpen || pieces.length <= 200) ? React.createElement("button", {
+      type: "button",
+      "data-testid": "orders-toggle-all",
+      onClick: () => setAllOrders(!anyOpen),
+      style: {
+        fontSize: 11,
+        padding: "5px 9px",
+        border: "1px solid #e5e5e5",
+        borderRadius: 6,
+        background: "#fff",
+        color: "#444",
+        cursor: "pointer",
+        fontFamily: "inherit",
+        fontWeight: 600,
+        whiteSpace: "nowrap"
+      }
+    }, anyOpen ? "Cerrar todo" : "Abrir todo") : null;
+  })(), React.createElement(Btn, {
     s: true,
     onClick: () => {
       setPieces([]);
       setNestResult(null);
+      setOrderOpen({}); // v101
+      setOrderShowAll({});
+      setViewerId(null);
     }
-  }, "Limpiar todo")), !pieces.length ? React.createElement("div", {
+  }, "Limpiar todo"))), !pieces.length ? React.createElement("div", {
     style: {
       flex: 1,
       display: "flex",
@@ -18640,7 +18987,7 @@ function App() {
     }
   }, React.createElement(Btn, {
     p: true,
-    onClick: () => fileRef.current && fileRef.current.click()
+    onClick: () => openFilePicker(null)
   }, "\uD83D\uDCC2 Abrir archivo"), React.createElement(Btn, {
     s: true,
     onClick: () => setShowPaste(true)
@@ -18659,22 +19006,39 @@ function App() {
       setSvgText("");
     }
   })) : React.createElement(React.Fragment, null, React.createElement("div", {
+    "data-testid": "order-list",
     style: {
-      maxHeight: 400,
+      maxHeight: "min(62vh, 620px)",
       overflow: "auto",
       padding: 6
     }
-  }, pieces.map((p, idx) => React.createElement(PieceCard, {
-    key: p.id,
-    piece: p,
-    idx: idx,
-    onUpdate: updatePiece,
-    onRemove: removePiece,
-    capas: capas,
-    nSheets: nestResult ? nestResult.length : 0,
-    onAssignCapa: assignCapaPiece,
-    onOpenCapas: id => setCapaModalId(id),
-    colorMap: _pieceColorMap
+  }, _orderGroups.map((g, gi) => React.createElement(OrderGroup, {
+    // v101: un pedido = una pestaña plegable con sus piezas dentro
+    key: "og:" + g.key,
+    g: g,
+    gi: gi,
+    open: isOrderOpen(g),
+    color: g.loose ? "#bbbbbb" : orderColorOf({ ref: g.key }, _pieceColorMap),
+    place: nestResult ? _orderPlace.get(g.key) || { sheets: [], placed: 0 } : null,
+    showAll: !!orderShowAll[g.key],
+    onToggle: () => toggleOrder(g),
+    onShowAll: () => setOrderShowAll(o => ({ ...o, [g.key]: true })),
+    onAddFile: g.loose ? null : () => openFilePicker(orderTargetOf(g)),
+    onAddManual: () => addManualToOrder(g),
+    onRemove: () => removeOrder(g.key),
+    renderCard: it => React.createElement(PieceCard, {
+      key: it.p.id,
+      piece: it.p,
+      idx: it.idx,
+      onUpdate: updatePiece,
+      onRemove: removePiece,
+      capas: capas,
+      nSheets: nestResult ? nestResult.length : 0,
+      onAssignCapa: assignCapaPiece,
+      onOpenCapas: id => setCapaModalId(id),
+      colorMap: _pieceColorMap,
+      onView: setViewerId
+    })
   }))), React.createElement("div", {
     style: {
       display: "flex",
@@ -18684,7 +19048,7 @@ function App() {
     }
   }, React.createElement(Btn, {
     p: true,
-    onClick: () => fileRef.current && fileRef.current.click(),
+    onClick: () => openFilePicker(null),
     style: {
       flex: 1
     }
@@ -19746,6 +20110,159 @@ function MetaItem({
     }
   }, v));
 }
+/* ══ v101 · PESTAÑA DE PEDIDO (lista "PIEZAS A CORTAR") ═══════════════════════════════
+   Cabecera = UN botón que solo pliega/despliega (un toque nunca borra nada). Abierta: barra
+   del pedido (añadir archivo, añadir pieza, quitar pedido con confirmación en línea), una
+   subcabecera por línea si el pedido llega en varias, y las PieceCard de siempre. Plegada no
+   monta ninguna tarjeta y abierta monta como mucho ORDER_PAGE: un lote de 600 piezas solo
+   pinta cabeceras. */
+const _ogToolBtn = { minHeight: 32, padding: "5px 10px", fontSize: 11.5, fontWeight: 600, fontFamily: "inherit", color: "#333", background: "#fff", border: "1px dashed #ccc", borderRadius: 6, cursor: "pointer" };
+function OrderGroup({
+  g,
+  gi,
+  open,
+  color,
+  place,
+  showAll,
+  onToggle,
+  onShowAll,
+  onAddFile,
+  onAddManual,
+  onRemove,
+  renderCard
+}) {
+  const [ask, setAsk] = useState(false);
+  useEffect(() => {
+    if (!open) setAsk(false);
+  }, [open]);
+  const shown = open ? showAll ? g.items : g.items.slice(0, ORDER_PAGE) : [];
+  const rest = open ? g.items.length - shown.length : 0;
+  let badge = null;
+  if (place) {
+    badge = place.placed < g.units ? React.createElement("span", {
+      style: { color: "#d97706", fontWeight: 700 }
+    }, "⚠ ", g.units - place.placed, " sin colocar") : React.createElement("span", {
+      style: { color: "#16a34a", fontWeight: 700 }
+    }, "▦ Placa", place.sheets.length > 1 ? "s " : " ", place.sheets.map(s => s + 1).join(", "));
+  }
+  const sub = g.loose ? "demo, manuales o dibujadas en el editor" : (g.client || "") + (g.nFiles > 1 ? (g.client ? " \xB7 " : "") + g.nFiles + " archivos" : "");
+  const cards = [];
+  shown.forEach((it, k) => {
+    if (g.lines.length > 1 && (k === 0 || shown[k - 1].li !== it.li)) {
+      const ln = g.lines[it.li];
+      cards.push(React.createElement("div", {
+        key: "ln" + it.li,
+        "data-testid": "order-line",
+        style: { fontSize: 10.5, color: "#999", fontWeight: 700, padding: "6px 2px 4px", borderTop: k ? "1px dashed #eee" : "none", marginTop: k ? 4 : 0 }
+      }, ln.key, " \xB7 ", ln.n, " pzs"));
+    }
+    cards.push(renderCard(it));
+  });
+  return React.createElement("div", {
+    className: "og" + (open ? " og-open" : ""),
+    "data-testid": "order-group",
+    "data-order-key": g.key,
+    "data-open": open ? "1" : "0",
+    style: { marginBottom: 6 }
+  }, React.createElement("button", {
+    type: "button",
+    className: "og-head",
+    "data-testid": "order-toggle",
+    "aria-expanded": open,
+    "aria-controls": "og-body-" + gi,
+    title: g.title + (g.client ? " \xB7 " + g.client : ""),
+    onClick: onToggle,
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      minHeight: 46,
+      padding: "8px 10px",
+      background: open ? "#fdf2f9" : "#fff",
+      border: "1px solid #eee",
+      borderLeft: "5px solid " + color,
+      borderRadius: 8,
+      textAlign: "left",
+      cursor: "pointer",
+      fontFamily: "inherit",
+      position: open ? "sticky" : "static",
+      top: 0,
+      zIndex: open ? 2 : "auto"
+    }
+  }, React.createElement("span", {
+    className: "og-chev",
+    "aria-hidden": "true"
+  }, "▸"), React.createElement("span", {
+    "data-testid": "order-swatch",
+    style: { width: 12, height: 12, borderRadius: 3, background: color, flex: "0 0 auto" }
+  }), React.createElement("span", {
+    style: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }
+  }, React.createElement("span", {
+    style: { fontSize: 13, fontWeight: 700, color: g.loose ? "#888" : "#222", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+  }, g.title, g.lines.length > 1 && React.createElement("span", {
+    style: { fontSize: 11, fontWeight: 500, color: "#999" }
+  }, " \xB7 ", g.lines.length, " l\xEDneas")), sub && React.createElement("span", {
+    style: { fontSize: 11, color: "#888", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+  }, sub)), React.createElement("span", {
+    style: { flex: "0 0 auto", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, fontSize: 11 }
+  }, React.createElement("span", {
+    "data-testid": "order-counts",
+    style: { fontWeight: 700, color: "#555", whiteSpace: "nowrap" }
+  }, g.nPieces, " pzs \xB7 ", g.units, " uds"), (badge || g.forced > 0) && React.createElement("span", {
+    style: { whiteSpace: "nowrap", display: "flex", gap: 6 }
+  }, badge, g.forced > 0 && React.createElement("span", {
+    title: g.forced + " pieza(s) fijada(s) a placa",
+    style: { color: "#E6007E", fontWeight: 700 }
+  }, "⚑")))), open && React.createElement("div", {
+    id: "og-body-" + gi,
+    role: "region",
+    style: { marginLeft: 6, paddingLeft: 8, paddingTop: 6, borderLeft: "3px solid " + color + "55" }
+  }, React.createElement("div", {
+    className: "og-tools",
+    style: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6, alignItems: "center" }
+  }, onAddFile && React.createElement("button", {
+    type: "button",
+    "data-testid": "order-add-file",
+    title: "A\xF1adir piezas de un SVG/DXF/PDF/AI a este pedido; heredan su referencia, copias y material",
+    onClick: onAddFile,
+    style: _ogToolBtn
+  }, "＋ Archivo"), React.createElement("button", {
+    type: "button",
+    "data-testid": "order-add-manual",
+    title: g.loose ? "Pieza manual 200\xD7200" : "Pieza manual 200\xD7200 dentro de este pedido",
+    onClick: onAddManual,
+    style: _ogToolBtn
+  }, "＋ Pieza"), React.createElement("button", {
+    type: "button",
+    "data-testid": "order-delete",
+    onClick: () => setAsk(true),
+    style: { ..._ogToolBtn, marginLeft: "auto", border: "1px solid #fca5a5", color: "#ef4444" }
+  }, "🗑 ", g.loose ? "Quitar sin pedido" : "Eliminar pedido")), ask && React.createElement("div", {
+    "data-testid": "order-delete-ask",
+    style: { background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 6, padding: 8, fontSize: 11.5, color: "#7f1d1d", marginBottom: 6 }
+  }, g.loose ? "\xBFQuitar las " + g.nPieces + " piezas sin pedido de esta lista?" : "\xBFQuitar el pedido " + g.key + (g.client ? " (" + g.client + ")" : "") + " de esta lista? Se quitan " + g.nPieces + " piezas (" + g.units + " uds). El panel de pedidos no se toca.", React.createElement("div", {
+    style: { display: "flex", gap: 6, marginTop: 6 }
+  }, React.createElement("button", {
+    type: "button",
+    "data-testid": "order-delete-confirm",
+    onClick: () => {
+      setAsk(false);
+      onRemove();
+    },
+    style: { ..._ogToolBtn, border: "none", background: "#ef4444", color: "#fff" }
+  }, "S\xED, quitar"), React.createElement("button", {
+    type: "button",
+    "data-testid": "order-delete-cancel",
+    onClick: () => setAsk(false),
+    style: { ..._ogToolBtn, borderStyle: "solid" }
+  }, "Cancelar"))), cards, rest > 0 && React.createElement("button", {
+    type: "button",
+    "data-testid": "order-show-all",
+    onClick: onShowAll,
+    style: { ..._ogToolBtn, width: "100%", marginTop: 2 }
+  }, "Mostrar las ", rest, " restantes")));
+}
 function PieceCard({
   piece: p,
   idx,
@@ -19755,12 +20272,15 @@ function PieceCard({
   nSheets,
   onAssignCapa,
   onOpenCapas,
-  colorMap // v94: mapa referencia→color del lote (mismo que lienzo y PDF)
+  colorMap, // v94: mapa referencia→color del lote (mismo que lienzo y PDF)
+  onView // v101: abre el visor de la pieza (miniatura y lupa)
 }) {
   const col = COLORS[idx % COLORS.length];
   const cp = capaById(capas, p.capa || "corte");
   return React.createElement("div", {
-    className: "card-hover",
+    className: "card-hover piece-card",
+    "data-testid": "piece-card",
+    "data-piece-id": p.id,
     style: {
       display: "flex",
       flexDirection: "column",
@@ -19778,7 +20298,9 @@ function PieceCard({
       gap: 8,
       alignItems: "center"
     }
-  }, React.createElement("div", {
+  }, React.createElement(onView ? "button" : "div", {
+    // v101: la miniatura abre el visor de la pieza
+    ...(onView ? { type: "button", onClick: () => onView(p.id), title: "Ver en grande", "aria-label": "Ver pieza " + p.label, "data-testid": "piece-thumb" } : {}),
     style: {
       width: 42,
       height: 42,
@@ -19788,7 +20310,8 @@ function PieceCard({
       alignItems: "center",
       justifyContent: "center",
       flexShrink: 0,
-      overflow: "hidden"
+      overflow: "hidden",
+      ...(onView ? { border: "none", padding: 0, cursor: "zoom-in" } : {})
     }
   }, p.svgContent ? React.createElement("svg", {
     className: "capa-color nss",
@@ -19871,7 +20394,8 @@ function PieceCard({
   }, React.createElement(MiniInput, {
     label: "W",
     value: Math.round(p.w),
-    onChange: v => onUpdate(p.id, "w", v)
+    onChange: v => onUpdate(p.id, "w", v),
+    testId: "piece-w"
   }), React.createElement("span", {
     style: {
       color: "#aaa",
@@ -19880,14 +20404,18 @@ function PieceCard({
   }, "\xD7"), React.createElement(MiniInput, {
     label: "H",
     value: Math.round(p.h),
-    onChange: v => onUpdate(p.id, "h", v)
+    onChange: v => onUpdate(p.id, "h", v),
+    testId: "piece-h"
   }), React.createElement(MiniInput, {
     label: "Cant",
     value: p.quantity,
     onChange: v => onUpdate(p.id, "quantity", Math.max(1, v)),
-    w: 40
+    w: 40,
+    testId: "piece-qty"
   }))), React.createElement("button", {
     onClick: () => onRemove(p.id),
+    "data-testid": "piece-remove",
+    "aria-label": "Eliminar pieza",
     style: {
       position: "absolute",
       top: 4,
@@ -19947,7 +20475,23 @@ function PieceCard({
       fontFamily: "inherit",
       cursor: "pointer"
     }
-  }, "\u270E"), React.createElement("select", {
+  }, "\u270E"), onView && React.createElement("button", {
+    // v101: visor (medidas reales, editar, navegar el pedido, eliminar)
+    onClick: () => onView(p.id),
+    "data-testid": "piece-view",
+    title: "Ver en grande: medidas, editar, eliminar",
+    style: {
+      padding: "4px 8px",
+      border: "1px solid #e5e5e5",
+      borderRadius: 5,
+      background: "#fff",
+      color: "#666",
+      fontSize: 10,
+      fontWeight: 700,
+      fontFamily: "inherit",
+      cursor: "pointer"
+    }
+  }, "\uD83D\uDD0D"), React.createElement("select", {
     value: p.forceSheet == null ? "auto" : String(p.forceSheet),
     onChange: e => onUpdate(p.id, "forceSheet", e.target.value === "auto" ? null : parseInt(e.target.value)),
     title: "Fijar esta pieza a una placa (recalcula el nesting)",
@@ -19972,6 +20516,263 @@ function PieceCard({
     key: i,
     value: i
   }, "Placa ", i + 1)))));
+}
+/* ══ v101 · VISOR DE PIEZA ═══════════════════════════════════════════════════════════
+   Se abre desde la miniatura (o la lupa) de una tarjeta. Muestra la pieza en grande con su
+   MEDIDA REAL de corte y deja hacer lo mismo que la tarjeta: nombre, medidas (con proporción
+   bloqueada por defecto: el dibujo se encaja "meet", así que cambiar solo el ancho agrandaba
+   la caja pero no el corte), cantidad, capa, contorno a contorno, placa fija y eliminar.
+   ‹ › (o ←/→) recorren TODO el pedido. App lo pinta en un portal a <body>: dentro de la raíz
+   de App (.fade-in conserva un transform) quedaría bajo la barra LOTES y anclado a su caja. */
+const _pvBtn = { minWidth: 40, height: 40, border: "1px solid #e5e5e5", borderRadius: 8, background: "#fff", fontSize: 16, cursor: "pointer", fontFamily: "inherit", color: "#333" };
+const _pvSelect = { flex: 1, minWidth: 0, padding: "6px 8px", fontSize: 12, fontFamily: "inherit", border: "1px solid #e5e5e5", borderRadius: 6, background: "#fff" };
+function PieceViewerModal({
+  piece: p,
+  pos,
+  total,
+  title,
+  client,
+  color,
+  capas,
+  nSheets,
+  placements,
+  capaOpen,
+  onField,
+  onFields,
+  onAssignCapa,
+  onOpenCapas,
+  onPrev,
+  onNext,
+  onRemove,
+  onClose
+}) {
+  const rs = pieceRealSize(p);
+  const [lock, setLock] = useState(() => LS.get("np-pv-lock", true) !== false);
+  const [armDel, setArmDel] = useState(false);
+  const boxRef = useRef(null);
+  useEffect(() => setArmDel(false), [p.id]);
+  useEffect(() => {
+    if (!armDel) return;
+    const t = setTimeout(() => setArmDel(false), 3000);
+    return () => clearTimeout(t);
+  }, [armDel]);
+  useEffect(() => {
+    if (boxRef.current) boxRef.current.focus();
+  }, []);
+  /* Teclado en fase de CAPTURA: el lienzo (VectorEditor) escucha keydown en window y con un
+     objeto seleccionado Supr/Retroceso lo borran, las flechas lo mueven y las letras cambian
+     de herramienta. Mientras el visor está abierto ninguna tecla le llega (salvo la escritura
+     en un campo, que el lienzo ya ignora). */
+  useEffect(() => {
+    const h = e => {
+      // ya cerrado (React aún no ha limpiado el efecto): no tragarse el siguiente Esc del lienzo
+      if (!boxRef.current || !boxRef.current.isConnected) return;
+      const t = e.target;
+      const typing = t && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName);
+      if (e.key === "Escape") {
+        if (!capaOpen) {
+          e.stopPropagation();
+          onClose();
+        }
+        return;
+      }
+      if (typing) return;
+      e.stopPropagation();
+      if (capaOpen) return;
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        onPrev();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        onNext();
+      }
+    };
+    window.addEventListener("keydown", h, true);
+    return () => window.removeEventListener("keydown", h, true);
+  }, [capaOpen, onPrev, onNext, onClose]);
+  const setW = v => lock ? onFields(p.id, { w: v, h: +(v * rs.ratio).toFixed(1) }) : onField(p.id, "w", v);
+  const setH = v => lock ? onFields(p.id, { h: v, w: +(v / rs.ratio).toFixed(1) }) : onField(p.id, "h", v);
+  const boxDiffers = Math.abs(rs.w - p.w) > 0.5 || Math.abs(rs.h - p.h) > 0.5;
+  const hasArt = !!(p.svgContent && p.viewBox);
+  const corte = capaById(capas, "corte").color;
+  const cp = capaById(capas, p.capa || "corte");
+  const nestTxt = !placements ? "sin calcular" : placements.length ? placements.map(x => "Placa " + (x.si + 1) + (x.n > 1 ? " \xD7" + x.n : "")).join(" \xB7 ") : "sin colocar";
+  const row = (label, el) => React.createElement("div", {
+    style: { display: "flex", alignItems: "center", gap: 8, minHeight: 34 }
+  }, React.createElement("span", {
+    style: { width: 54, fontSize: 10, color: "#999", fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase" }
+  }, label), el);
+  return React.createElement("div", {
+    className: "pv-overlay",
+    onClick: e => {
+      if (e.target === e.currentTarget) onClose();
+    },
+    style: { position: "fixed", inset: 0, background: "rgba(15,18,22,.55)", zIndex: 100001, display: "flex", alignItems: "center", justifyContent: "center", padding: 12, fontFamily: "'Inter',sans-serif" }
+  }, React.createElement("div", {
+    ref: boxRef,
+    className: "pv-modal slide-up",
+    "data-testid": "piece-viewer",
+    role: "dialog",
+    "aria-modal": "true",
+    "aria-label": "Pieza " + p.label,
+    tabIndex: -1,
+    style: { background: "#fff", borderRadius: 14, width: "min(920px, 100%)", maxHeight: "calc(100dvh - 24px)", display: "flex", flexDirection: "column", overflow: "hidden", outline: "none", color: "#222" }
+  }, React.createElement("div", {
+    style: { display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderBottom: "1px solid #eee" }
+  }, React.createElement("span", {
+    style: { width: 14, height: 14, borderRadius: 3, background: color, flex: "0 0 auto" }
+  }), React.createElement("div", {
+    style: { flex: 1, minWidth: 0 }
+  }, React.createElement("div", {
+    style: { fontSize: 11, color: "#999", fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+  }, title === "Sin pedido" ? "Sin pedido" : "Pedido " + title + (client ? " \xB7 " + client : "")), React.createElement("input", {
+    value: p.label,
+    "aria-label": "Nombre de la pieza",
+    onChange: e => onField(p.id, "label", e.target.value),
+    style: { width: "100%", border: "none", outline: "none", padding: "2px 0", fontSize: 16, fontWeight: 700, fontFamily: "inherit", color: "#111", background: "transparent" }
+  })), React.createElement("span", {
+    "data-testid": "pv-counter",
+    style: { fontSize: 12, color: "#666", fontWeight: 600, whiteSpace: "nowrap" }
+  }, pos + 1, " / ", total), React.createElement("button", {
+    type: "button",
+    "data-testid": "pv-prev",
+    "aria-label": "Pieza anterior",
+    disabled: pos <= 0,
+    onClick: onPrev,
+    style: { ..._pvBtn, opacity: pos <= 0 ? 0.35 : 1 }
+  }, "‹"), React.createElement("button", {
+    type: "button",
+    "data-testid": "pv-next",
+    "aria-label": "Pieza siguiente",
+    disabled: pos >= total - 1,
+    onClick: onNext,
+    style: { ..._pvBtn, opacity: pos >= total - 1 ? 0.35 : 1 }
+  }, "›"), React.createElement("button", {
+    type: "button",
+    "data-testid": "pv-close",
+    "aria-label": "Cerrar",
+    onClick: onClose,
+    style: _pvBtn
+  }, "✕")), React.createElement("div", {
+    className: "pv-body",
+    style: { display: "flex", gap: 14, padding: 14, overflow: "auto" }
+  }, React.createElement("div", {
+    style: { flex: 1, minHeight: 280, minWidth: 0, background: "#fafafa", border: "1px solid #eee", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", padding: 12 }
+  }, hasArt ? React.createElement("svg", {
+    className: "capa-color nss",
+    viewBox: p.viewBox,
+    preserveAspectRatio: "xMidYMid meet",
+    style: { width: "100%", height: "min(56vh, 520px)", overflow: "visible" }
+  }, React.createElement("g", {
+    fill: "none",
+    stroke: corte,
+    strokeWidth: "1.6",
+    dangerouslySetInnerHTML: { __html: p.svgContent }
+  })) : React.createElement("svg", {
+    viewBox: "0 0 " + Math.max(1, p.w) + " " + Math.max(1, p.h),
+    preserveAspectRatio: "xMidYMid meet",
+    style: { width: "100%", height: "min(56vh, 520px)", overflow: "visible" }
+  }, React.createElement("rect", {
+    x: 0, y: 0, width: Math.max(1, p.w), height: Math.max(1, p.h),
+    fill: "none", stroke: cp.color, strokeWidth: 1.6, vectorEffect: "non-scaling-stroke"
+  }))), React.createElement("div", {
+    className: "pv-side",
+    style: { width: 290, flex: "0 0 auto", display: "flex", flexDirection: "column", gap: 6 }
+  }, React.createElement("div", {
+    style: { fontSize: 10, color: "#999", fontWeight: 700, letterSpacing: 0.6 }
+  }, "MEDIDA REAL DE CORTE"), React.createElement("div", {
+    "data-testid": "pv-dims",
+    style: { fontSize: 22, fontWeight: 800, color: "#111" }
+  }, fmtMM(rs.w), " \xD7 ", fmtMM(rs.h), " mm", React.createElement("span", {
+    style: { display: "block", fontSize: 12, fontWeight: 500, color: "#999" }
+  }, fmtMM(rs.w / 10), " \xD7 ", fmtMM(rs.h / 10), " cm")), hasArt && boxDiffers && React.createElement("div", {
+    "data-testid": "pv-boxnote",
+    style: { fontSize: 11, background: "#fffbeb", border: "1px solid #fcd34d", borderRadius: 6, padding: "6px 8px", color: "#78350f" }
+  }, "La caja es ", fmtMM(p.w), " \xD7 ", fmtMM(p.h), " mm, pero el dibujo no se deforma: corta ", fmtMM(rs.w), " \xD7 ", fmtMM(rs.h), " mm. Con el candado activado, cambia una medida para ajustar la caja."), React.createElement("div", {
+    key: "dims-" + p.id, // al navegar se descartan los borradores de las medidas
+    style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", minHeight: 34 }
+  }, React.createElement(MiniInput, {
+    label: "ANCHO",
+    value: Math.round(p.w * 10) / 10,
+    onChange: setW,
+    w: 66,
+    testId: "pv-w"
+  }), React.createElement("span", {
+    style: { color: "#aaa" }
+  }, "\xD7"), React.createElement(MiniInput, {
+    label: "ALTO",
+    value: Math.round(p.h * 10) / 10,
+    onChange: setH,
+    w: 66,
+    testId: "pv-h"
+  }), React.createElement("label", {
+    title: "Mantener la proporci\xF3n del dibujo al cambiar una medida",
+    style: { display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#555", cursor: "pointer" }
+  }, React.createElement("input", {
+    type: "checkbox",
+    "data-testid": "pv-lock",
+    checked: lock,
+    onChange: e => {
+      setLock(e.target.checked);
+      LS.set("np-pv-lock", e.target.checked);
+    }
+  }), "🔗 Proporci\xF3n")), row("Cant", React.createElement(MiniInput, {
+    key: "q-" + p.id,
+    label: "",
+    value: p.quantity || 1,
+    onChange: v => onField(p.id, "quantity", Math.max(1, Math.round(v))),
+    w: 66,
+    testId: "pv-qty"
+  })), row("Capa", React.createElement("div", {
+    style: { display: "flex", gap: 6, flex: 1, minWidth: 0 }
+  }, React.createElement("select", {
+    "data-testid": "pv-capa",
+    value: p.capa || "corte",
+    onChange: e => onAssignCapa(p.id, e.target.value),
+    style: { ..._pvSelect, borderLeft: "8px solid " + cp.color }
+  }, capas.map(c => React.createElement("option", {
+    key: c.id,
+    value: c.id
+  }, c.name))), hasArt && React.createElement("button", {
+    type: "button",
+    "data-testid": "pv-capas",
+    title: "Asignar capa contorno a contorno",
+    onClick: () => onOpenCapas(p.id),
+    style: { ..._pvBtn, height: 34, fontSize: 12, padding: "0 8px" }
+  }, "✎ Contornos"))), row("Placa", React.createElement("select", {
+    "data-testid": "pv-sheet",
+    value: p.forceSheet == null ? "auto" : String(p.forceSheet),
+    onChange: e => onField(p.id, "forceSheet", e.target.value === "auto" ? null : parseInt(e.target.value)),
+    style: _pvSelect
+  }, React.createElement("option", {
+    value: "auto"
+  }, "Auto"), Array.from({
+    length: Math.max(2, (nSheets || 0) + 1)
+  }, (_, i) => React.createElement("option", {
+    key: i,
+    value: i
+  }, "Placa ", i + 1)))), React.createElement("div", {
+    style: { fontSize: 11, color: "#666", lineHeight: 1.6, marginTop: 4, borderTop: "1px solid #f0f0f0", paddingTop: 6 }
+  }, p.fileName && React.createElement("div", {
+    style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+    title: p.fileName
+  }, "Archivo: ", p.fileName), p.mat && React.createElement("div", null, "Material: ", sheetTitleText(p.mat, null, p.matColor)), React.createElement("div", {
+    "data-testid": "pv-nest"
+  }, "Nesting: ", nestTxt)))), React.createElement("div", {
+    style: { display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderTop: "1px solid #eee" }
+  }, React.createElement("button", {
+    type: "button",
+    "data-testid": "pv-delete",
+    onClick: () => armDel ? onRemove() : setArmDel(true),
+    style: { ..._pvBtn, padding: "0 14px", fontSize: 13, fontWeight: 700, border: "1px solid #fca5a5", background: armDel ? "#ef4444" : "#fff", color: armDel ? "#fff" : "#ef4444" }
+  }, armDel ? "\xBFEliminar? Toca otra vez" : "🗑 Eliminar pieza"), React.createElement("span", {
+    style: { flex: 1 }
+  }), React.createElement("button", {
+    type: "button",
+    "data-testid": "pv-done",
+    onClick: onClose,
+    style: { ..._pvBtn, padding: "0 18px", fontSize: 13, fontWeight: 700, background: "#111", color: "#fff", border: "none" }
+  }, "Cerrar"))));
 }
 function CapaEditorModal({
   piece,
@@ -20001,7 +20802,7 @@ function CapaEditorModal({
       position: "fixed",
       inset: 0,
       background: "#00000044",
-      zIndex: 10001,
+      zIndex: 100002, // v101: en portal a <body>, por encima del visor y de la barra LOTES
       display: "flex",
       alignItems: "center",
       justifyContent: "center",
@@ -20168,7 +20969,8 @@ function MiniInput({
   label,
   value,
   onChange,
-  w
+  w,
+  testId
 }) {
   const [local, setLocal] = useState(String(value));
   const [focused, setFocused] = useState(false);
@@ -20208,6 +21010,7 @@ function MiniInput({
     onKeyDown: e => {
       if (e.key === 'Enter') e.target.blur();
     },
+    "data-testid": testId, // v101: ganchos de los tests
     style: {
       width: w || 54,
       padding: "2px 5px",
