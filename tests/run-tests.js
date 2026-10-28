@@ -383,6 +383,40 @@ async function main() {
     assert(r.on.radio < 700, 'el pedido metido entero debe quedar junto: radio ' + Math.round(r.on.radio) + ' mm');
     assert(!r.on.a.overlaps.length && !r.on.a.outside, JSON.stringify(r.on.a).slice(0, 300));
   });
+  // ── v104: resultado estable, zona de relleno a placa entera y aprovechamiento real ──
+  await test('mismo lote, mismo resultado: anidar dos veces da la misma maqueta (v104)', async () => {
+    const aro = '<svg xmlns="http://www.w3.org/2000/svg" width="1900mm" height="1900mm" viewBox="0 0 1900 1900"><path fill-rule="evenodd" d="' + circ(950, 950, 950, 180) + circ(950, 950, 890, 180) + '"/></svg>';
+    const r = await page.evaluate(async ({ aro, sq }) => {
+      const lots = [__synth, [...orderToPieces({ ref: 'AROGRANDE-1', fileName: 'g.svg', qty: 1 }, parseSVG(aro).pieces, 'PVC'), ...orderToPieces({ ref: 'CUADROSXX-1', fileName: 'c.svg', qty: 30 }, parseSVG(sq).pieces, 'PVC')]];
+      const sig = sh => sh.map(s => s.pieces.map(p => p.instanceId + '@' + p.x.toFixed(2) + ',' + p.y.toFixed(2) + 'r' + p.rotation).sort().join('|')).join('#');
+      const out = [];
+      for (const lot of lots) { const a = sig(await nestWithRetales(lot, 2000, 2000, 5, null, [])), b = sig(await nestWithRetales(lot, 2000, 2000, 5, null, [])); out.push(a === b && a.length > 0); }
+      return out;
+    }, { aro, sq: svgPoly('0,0 150,0 150,150 0,150', 150, 150) });
+    assert(r.every(Boolean), 'la segunda vez sale otra maqueta: ' + JSON.stringify(r));
+  });
+  await test('pieza grande que domina la placa: lo suelto ocupa también las franjas de al lado, no otra placa', async () => {
+    // marco de 1500×2300 (banda 60) en placa 2000×3000 + 160 cuadros de 150: no caben todos dentro del marco
+    const marco = '<svg xmlns="http://www.w3.org/2000/svg" width="1500mm" height="2300mm" viewBox="0 0 1500 2300"><path fill-rule="evenodd" d="M0,0L1500,0L1500,2300L0,2300Z M60,60L60,2240L1440,2240L1440,60Z"/></svg>';
+    const r = await page.evaluate(async ({ marco, sq }) => {
+      const run = async on => {
+        const prev = __NEST_CFG__.fillHoles; __NEST_CFG__.fillHoles = on;
+        try {
+          const pcs = [...orderToPieces({ ref: 'MARCOGRAN-1', fileName: 'm.svg', qty: 1 }, parseSVG(marco).pieces, 'PVC'), ...orderToPieces({ ref: 'CUADROSYY-1', fileName: 'c.svg', qty: 160 }, parseSVG(sq).pieces, 'PVC')];
+          const sh = await nestWithRetales(pcs, 2000, 3000, 5, null, []);
+          const m = sh[0].pieces.find(p => orderKeyOf(p) === 'MARCOGRAN'), bx = m ? m.x + m.placedW + 100 : 0, by = m ? m.y + m.placedH + 100 : 0;
+          const fuera = sh[0].pieces.filter(p => orderKeyOf(p) === 'CUADROSYY' && (p.x > bx || p.y > by)).length;
+          const area = sh.reduce((a, s) => a + s.pieces.reduce((b, p) => b + (p._area || 0), 0), 0);
+          return { n: sh.length, fuera, aprov: area / (sh.length * 2000 * 3000), a: __t.audit(sh, 2000, 3000, 5) };
+        } finally { __NEST_CFG__.fillHoles = prev; }
+      };
+      return { on: await run(true), off: await run(false) };
+    }, { marco, sq: svgPoly('0,0 150,0 150,150 0,150', 150, 150) });
+    assert(r.off.n > 1, 'sin relleno el marco se queda su placa: ' + r.off.n);
+    assert(r.on.n === 1 && r.on.fuera > 0, 'los que no caben en el marco deben ir a su lado, en la misma placa: ' + JSON.stringify({ n: r.on.n, fuera: r.on.fuera }));
+    assert(r.on.aprov > 0 && r.on.aprov <= 1, 'aprovechamiento real entre 0 y 100 %: ' + r.on.aprov);
+    assert(!r.on.a.overlaps.length && !r.on.a.outside, JSON.stringify(r.on.a).slice(0, 300));
+  });
   await test('rótulos fuera de la placa y título encima', async () => {
     const r = await page.evaluate(async () => {
       const sh = await nestWithRetales(__synth, 2000, 3000, 5, null, []);

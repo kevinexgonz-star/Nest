@@ -86,6 +86,23 @@ Lo que sale del nesting (lienzo, DXF, SVG y PDF) queda maquetado como se hace a 
   no comparten placa.
 - La **cantidad** de un pedido multiplica TODAS sus piezas (antes solo la primera).
 
+## Mismo lote, mismo resultado (v104)
+
+Anidar dos veces el mismo lote podía dar otra maqueta: en un lote de PVC 3 la segunda vez las
+piezas se amontonaban arriba a la izquierda, las flechas de BFYACFTOX se partían en dos placas y
+salía una placa de más.
+
+- **Resultado estable.** La pasada de giros finos ya no depende del tiempo medido en la máquina
+  (cambia de una vez a otra): el paso sale del número de piezas del lote. Hasta 120 piezas, el
+  del selector Giro; hasta 400, al menos 30°; hasta 1200, al menos 45°; más, solo
+  0/90/180/270. El tope de 40 s queda solo como red de seguridad. Mismo lote y mismos ajustes,
+  misma maqueta.
+- **Zona de relleno a placa entera.** Si la caja de las piezas muy grandes cubre ≥ 40 % de la
+  placa, la zona de relleno es la placa entera: lo que no cabe dentro de la flecha o el marco
+  ocupa también las franjas de al lado, en vez de irse a otra placa.
+- **Aprov. real.** El aprovechamiento cuenta el material de cada pieza, no su caja (con
+  flechas curvas y letras giradas salía por encima del 100 %, p. ej. 219 %).
+
 ## Piezas muy grandes e interiores (v103)
 
 Un lote de PVC 3 con dos flechas enormes (BFYACFTOX) dejaba una placa casi vacía para ellas
@@ -125,7 +142,7 @@ con v101; con v102 sale en 2, cada pedido en su bloque y con su rótulo fuera de
   (≥ hueco + ~12 mm).
 - **Dos pasadas con tiempo medido**: primero 0/90/180/270 (resultado seguro, mide la máquina) y
   después la fina si cabe en el presupuesto (15° → 30° → 45°; los lotes de más de 300 piezas no
-  bajan de 30°), con tope duro de 26 s. Gana la que gasta menos placas y, a igualdad, deja la
+  bajan de 30°), con tope duro de 26 s (desde v104 el paso se elige por número de piezas). Gana la que gasta menos placas y, a igualdad, deja la
   última más libre y más arriba (un retal aprovechable).
 - El lienzo, el DXF/SVG/PDF y el estimado dibujan cada giro fino exactamente donde lo reservó el
   motor.

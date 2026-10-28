@@ -1,7 +1,20 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v103 — Nesting · Editor · Capas                 ║
+     ║  ROTULA NEST v104 — Nesting · Editor · Capas                 ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v104: MISMO LOTE, MISMO RESULTADO. Anidar dos veces el      ║
+     ║  mismo lote podia dar otra maqueta: la pasada de giros finos ║
+     ║  dependia del tiempo medido en la maquina y, cuando no       ║
+     ║  entraba, todo iba a 0/90/180/270 (lote PVC 3 con separacion ║
+     ║  8 mm: las flechas BFYACFTOX partidas en dos placas y una    ║
+     ║  placa de mas). Ahora el paso fino sale del numero de piezas ║
+     ║  (hasta 120 el elegido, 400 >= 30, 1200 >= 45, mas solo 90;  ║
+     ║  tope de 40 s solo como red de seguridad). Zona de relleno:  ║
+     ║  si la caja de las piezas muy grandes cubre >= 40% de la     ║
+     ║  placa, la zona es la placa entera (antes lo suelto se       ║
+     ║  amontonaba arriba a la izquierda, dentro de esa caja).      ║
+     ║  Aprov. cuenta el material real de cada pieza, no su caja    ║
+     ║  (salia 219%).                                               ║
      ║  v103: RELLENO JUNTO A PIEZAS MUY GRANDES E INTERIORES. Una  ║
      ║  pieza muy grande y hueca (flecha curva, aro, marco: caja >= ║
      ║  12% de la placa y material < 60% de su caja) abre una zona  ║
@@ -12233,7 +12246,7 @@ async function nestPiecesNFP(pieces, W, H, gap, onProgress) {
        ocupar la ensenada que deja una "L" o un bloque escalonado, con su pasillo, sin
        meterse entre las letras.
      · Dos pasadas: A con 0/90/180/270 (resultado seguro, mide la máquina) y B con giros
-       finos si caben en OB_BUDGET_MS según lo que tardó A (15° → 30° → 45°), con tope duro
+       finos (15° → 30° → 45° según el tamaño del lote, obFineStep), con red de seguridad
        OB_HARD_MS. Gana la que gasta menos placas y deja más libre la última.
 
    v103 · PIEZAS MUY GRANDES E INTERIORES (un lote de PVC con dos flechas enormes ocupaba una
@@ -12245,7 +12258,15 @@ async function nestPiecesNFP(pieces, W, H, gap, onProgress) {
        enteros (como bloque o juntos) y parte de un pedido grande, que se re-empaqueta—.
        Fuera de la zona todo sigue agrupado como en v102.
      · Si la última placa casi vacía cabe en los huecos de las demás, se vacía (evictLast).
-     · Interruptor "Rellenar huecos" (__NEST_CFG__.fillHoles): apagado = v102. */
+     · Interruptor "Rellenar huecos" (__NEST_CFG__.fillHoles): apagado = v102.
+
+   v104 · MISMO LOTE, MISMO RESULTADO (anidar dos veces daba otra maqueta: la pasada fina
+   dependía del tiempo medido y, sin ella, las flechas de un lote de PVC iban a dos placas):
+     · La pasada fina y su paso salen del número de piezas (obFineStep), no del reloj; zona de
+       relleno y vaciado de la última placa ya no dependen del tiempo gastado.
+     · Si la caja de las piezas muy grandes cubre ≥ OB_ZONE_FULL_FRAC de la placa, la zona de
+       relleno es la placa entera: lo que no cabe dentro va a las franjas de al lado.
+     · Cada pieza devuelta lleva `_area` (su material real) para el % de aprovechamiento. */
 const OB_ORDER_GAP_MM = 12;
 const OB_ROTATE_BIAS_MM = 15; // lo que tiene que subir una pieza girada para preferirla a derechas
 const OB_BLOCK_ROTATE_BIAS_MM = 150; // ídem para girar un bloque entero (todas sus letras)
@@ -12256,21 +12277,29 @@ const OB_FITS = ["cog", "top"]; // v102: criterios de empaquetado de cada pedido
 const OB_ASSEMBLY = [[false, false], [true, false], [true, true]]; // v102: [silueta, borde inferior]
 const OB_WIDTHS = [0.5, 0.75, 1, 1.35, 1.9, 2.6]; // anchos de franja (× lado del cuadrado equivalente)
 const OB_WIDTHS_FINE = [0.75, 1, 1.35, 1.9]; // v102: en la pasada fina, menos franjas (cada una cuesta ×6)
-const OB_BUDGET_MS = 16000; // v102: la pasada fina solo arranca si se estima dentro de esto
-const OB_HARD_MS = 26000; // v102: y se descarta si llega aquí (el vigilante de runNesting corta a 35 s)
-const OB_FINE_MAX_Q = 300; // v102: con más piezas que esto el giro fino no baja de 30°
+const OB_HARD_MS = 40000; // red de seguridad: lo que pase de aquí se descarta (el vigilante de runNesting corta a 60 s)
+/* v104: paso de giro fino según el número de piezas del lote (determinista): hasta 120, el
+   elegido; hasta 400, al menos 30°; hasta 1200, al menos 45°; más, solo 0/90/180/270. */
+const OB_FINE_Q = [120, 400, 1200];
+function obFineStep(want, n) {
+  if (!(want < 90)) return null;
+  if (n <= OB_FINE_Q[0]) return want;
+  if (n <= OB_FINE_Q[1]) return Math.max(want, 30);
+  if (n <= OB_FINE_Q[2]) return Math.max(want, 45);
+  return null;
+}
 const OB_HOLE_MIN_BAND_MM = 4; // v103: banda mínima de material alrededor de un interior pasante
 const OB_HOLE_MIN_SIZE_MM = 50; // v103: un interior más estrecho no admite ninguna pieza: se trata como macizo
 const OB_BIG_AREA_FRAC = 0.12; // v103: pieza muy grande = su caja ocupa ≥ 12 % de la placa…
 const OB_BIG_FILL_MAX = 0.6; // …y su material no llega al 60 % de esa caja (flecha curva, aro, marco)
 const OB_ZONE_MARGIN_MM = 100; // v103: la zona de relleno abarca la caja de las grandes y este margen
+const OB_ZONE_FULL_FRAC = 0.4; // v104: si esa caja cubre ≥ 40 % de la placa, la zona es la placa entera
 const OB_FILL_PARTIAL_MIN = 40; // v103: solo un pedido de ≥ 40 piezas puede repartirse entre la zona y su bloque
 const OB_FILL_MIN_PIECES = 3; // v103: y solo si mete al menos estas piezas en la zona
 const OB_WIDTHS_REFORM = [0.75, 1, 1.35]; // v103: franjas al re-empaquetar lo que sobra de un pedido
 const OB_NEAR_MM = 350; // v103: un pedido metido entero en la zona busca sitio a esta distancia de los suyos
 const OB_EVICT_MAX_PIECES = 80; // v103: vaciar la última placa solo si lleva pocas piezas…
 const OB_EVICT_MAX_FRAC = 0.25; // …y poco material (≤ 25 % de la placa)
-const OB_BUDGET_BIG_MS = 11000; // v103: con piezas muy grandes la pasada fina deja sitio al relleno
 /* mm por celda: ~700k celdas por placa (2000×3000 → 2,9 mm). Más fino = más denso y lento. */
 function obResolution(W, H) {
   return Math.min(5, Math.max(1.5, Math.sqrt(W * H / 700000)));
@@ -13062,6 +13091,10 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
     if (!(zx1 > zx0)) return 0;
     const mg = Math.round(OB_ZONE_MARGIN_MM / R);
     zx0 = Math.max(0, zx0 - mg); zy0 = Math.max(0, zy0 - mg); zx1 = Math.min(gw, zx1 + mg); zy1 = Math.min(gh, zy1 + mg);
+    /* v104: una grande que ocupa buena parte de la placa la domina entera: las franjas que deja
+       a su lado también son zona de relleno (antes se quedaban vacías y lo suelto se apiñaba
+       arriba a la izquierda, en la caja de la flecha). */
+    if ((zx1 - zx0) * (zy1 - zy0) >= OB_ZONE_FULL_FRAC * gw * gh) { zx0 = 0; zy0 = 0; zx1 = gw; zy1 = gh; }
     // rejilla FINA de la placa: piezas reales (no siluetas); fuera de la zona, ocupado
     const G = obGrid(gw, gh);
     const rect = (x, y, w, h) => { if (w > 0 && h > 0) G.stamp(obRectMask(w, h), x, y); };
@@ -13283,20 +13316,15 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   const A = await pass([0, 2, 1, 3], OB_WIDTHS, 0.5);
   A.step = 90;
   let winner = A;
-  // ── 4. pasada B: giros finos, si caben en el tiempo (se calibra con lo que tardó A) ──
+  /* ── 4. pasada B: giros finos ──
+     v104: el paso se decide por el TAMAÑO del lote, nunca por el tiempo medido: con el reloj,
+     el mismo lote daba un resultado u otro según lo cargada que estuviera la máquina (una vez
+     las dos flechas de un pedido cabían juntas, la siguiente no). Lotes grandes, paso más
+     grueso; OB_HARD_MS solo es una red de seguridad. */
   const want = OB_ROT_STEPS.indexOf(+__NEST_CFG__.rotStep) >= 0 ? +__NEST_CFG__.rotStep : 15;
   const tA = Date.now() - t0;
-  /* Coste estimado de la pasada fina con lo MEDIDO en la A: máscaras × ángulos base nuevos,
-     empaquetado × orientaciones (y franjas) de más, y un reparto parecido al de A. */
-  const estB = s => {
-    const nb = obRotBase(s).length;
-    return tMasks * nb + A.t[0] * (1 + nb) * OB_WIDTHS_FINE.length / OB_WIDTHS.length + A.t[1] * 1.15;
-  };
-  // muchas piezas (letras pequeñas): 30° da lo mismo que 15° en la mitad de tiempo
-  const minStep = Math.max(want, totalQ > OB_FINE_MAX_Q ? 30 : 0);
-  const budget = anyBig ? OB_BUDGET_BIG_MS : OB_BUDGET_MS;
-  const step = want < 90 ? [minStep, 30, 45].filter((s, i, a) => s >= minStep && a.indexOf(s) === i).find(s => tA + estB(s) <= budget) : null;
-  const diag = { tA, tMasks, tAparts: A.t, est: want < 90 ? Math.round(estB(want)) : 0, step: step || null, a: [A.miss.length].concat(A.score), big: anyBig };
+  const step = obFineStep(want, totalQ);
+  const diag = { tA, tMasks, tAparts: A.t, step: step || null, a: [A.miss.length].concat(A.score), big: anyBig };
   const better = (X, Y) => obScoreLess([X.miss.length].concat(X.score), [Y.miss.length].concat(Y.score));
   if (step) {
     deadline = t0 + OB_HARD_MS;
@@ -13320,7 +13348,7 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   }
   // ── 5. v103: relleno junto a piezas muy grandes (sobre el reparto ganador; mismo tope de tiempo) ──
   const beforeZ = winner;
-  if (anyBig && Date.now() - t0 < OB_HARD_MS) {
+  if (anyBig) {
     deadline = t0 + OB_HARD_MS;
     try {
       const W0 = winner;
@@ -13341,7 +13369,7 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
     } finally { deadline = Infinity; }
   }
   // ── 6. v103: vaciar la última placa si sus pedidos caben juntos en los huecos de las demás ──
-  if (holesOn && winner.shs.length > 1 && Date.now() - t0 < OB_HARD_MS - 3000) {
+  if (holesOn && winner.shs.length > 1) {
     deadline = t0 + OB_HARD_MS;
     try {
       const before = winner;
@@ -13376,7 +13404,8 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
             placedW: pw, placedH: ph, drawW: pw, drawH: ph,
             gridW: Math.max(1, Math.ceil(pw / GRID_CELL)), gridH: Math.max(1, Math.ceil(ph / GRID_CELL)),
             rotated: rot !== 0, rotation: rot,
-            instanceId: (src.id != null ? src.id : 'p' + pl.t) + '-q' + pl.inst.c
+            instanceId: (src.id != null ? src.id : 'p' + pl.t) + '-q' + pl.inst.c,
+            _area: solidA[pl.t] // v104: material real (mm², sin interiores) para el % de aprovechamiento
           });
           target.check.push({ label: src.label, solid });
         }
@@ -18594,10 +18623,10 @@ function App() {
         reportProgress(phase === "masks" ? 4 + 58 * f : 62 + 37 * f, "Nesting");
       }, __matRetales);
       // Watchdog: si el motor se cuelga (HW lento o forma patológica) se aborta con error en vez
-      // de quedarse clavado en 99% bloqueando la app. El motor ya tiene tope interno (~20s); esto
+      // de quedarse clavado en 99% bloqueando la app. El motor ya tiene tope interno (~40 s); esto
       // es la red de seguridad por encima. Al terminar SIEMPRE se limpia el estado (finally abajo).
       let __wd;
-      const __guard = new Promise((_, rej) => { __wd = setTimeout(() => rej(new Error("tiempo de nesting agotado")), 35000); });
+      const __guard = new Promise((_, rej) => { __wd = setTimeout(() => rej(new Error("tiempo de nesting agotado")), 60000); });
       try { result = await Promise.race([__nestProm, __guard, __cancelProm]); }
       finally { clearTimeout(__wd); }
       try {
@@ -18656,6 +18685,9 @@ function App() {
     const totalPieces = nestResult.reduce((s, sh) => s + sh.pieces.length, 0);
     let pieceAreaTotal = 0;
     nestResult.forEach(s => s.pieces.forEach(p => {
+      // v104: material real si el motor lo da (las cajas de una flecha curva o de una pieza girada
+      // 15° son mucho mayores que su material y el aprovechamiento salía por encima del 100 %)
+      if (p._area > 0) { pieceAreaTotal += p._area / 1e6; return; }
       const rw = p.drawW !== undefined ? p.drawW : p.placedW;
       const rh = p.drawH !== undefined ? p.drawH : p.placedH;
       pieceAreaTotal += rw * rh / 1e6;
@@ -19582,7 +19614,7 @@ function App() {
     style: {
       color: "#E6007E"
     }
-  }, "v103"))))), tab === "nesting" && React.createElement("div", {
+  }, "v104"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",
