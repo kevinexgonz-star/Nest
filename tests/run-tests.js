@@ -107,7 +107,7 @@ async function main() {
       centroid: pls => { let A = 0, X = 0, Y = 0; pls.forEach(q => { for (let i = 0; i + 1 < q.length; i++) { const k = q[i].x * q[i + 1].y - q[i + 1].x * q[i].y; A += k; X += (q[i].x + q[i + 1].x) * k; Y += (q[i].y + q[i + 1].y) * k; } }); return { x: X / (3 * A), y: Y / (3 * A) }; },
       // separación mínima real entre piezas colocadas y fuera de placa
       audit: (sheets, W, H, gap) => {
-        const CL = ClipperLib, S = 1000, rep = { overlaps: [], outside: 0, pieces: 0, blockOverlaps: [], orderSplit: [] };
+        const CL = ClipperLib, S = 1000, rep = { overlaps: [], outside: 0, pieces: 0, orderGaps: [], orderSplit: [] };
         sheets.forEach((sh, si) => {
           const G = sh.pieces.map(p => pieceToPolylinesMM(p).polylines);
           rep.pieces += G.length;
@@ -123,11 +123,19 @@ async function main() {
             let a = 0; o.forEach(pp => a += Math.abs(CL.Clipper.Area(pp)));
             if (a > 0.01 * S * S) rep.overlaps.push('placa ' + (si + 1) + ': ' + sh.pieces[i].label + ' / ' + sh.pieces[j].label);
           }
-          // bloques por pedido: cajas que no se pisan
-          const blk = {};
-          sh.pieces.forEach((p, i) => { const k = orderKeyOf(p); if (!k) return; const b = bb[i]; const e = blk[k] || (blk[k] = { a: 1e18, b: 1e18, c: -1e18, d: -1e18 }); e.a = Math.min(e.a, b.a); e.b = Math.min(e.b, b.b); e.c = Math.max(e.c, b.c); e.d = Math.max(e.d, b.d); });
-          const ks = Object.keys(blk);
-          for (let i = 0; i < ks.length; i++) for (let j = i + 1; j < ks.length; j++) { const A = blk[ks[i]], B = blk[ks[j]]; if (A.a < B.c && B.a < A.c && A.b < B.d && B.b < A.d) rep.blockOverlaps.push(ks[i] + '/' + ks[j]); }
+          // v102: los bloques encajan por su SILUETA (sus cajas pueden cruzarse), pero entre
+          // piezas de pedidos distintos queda siempre un pasillo ≥ hueco + 10 mm
+          const keyOf = sh.pieces.map(orderKeyOf), MG = gap + 10;
+          const offO = U.map(u => { const co = new CL.ClipperOffset(2, 0.02 * S); co.AddPaths(u, CL.JoinType.jtRound, CL.EndType.etClosedPolygon); const o = new CL.Paths(); co.Execute(o, (MG / 2 - 0.1) * S); return o; });
+          for (let i = 0; i < U.length; i++) for (let j = i + 1; j < U.length; j++) {
+            if (!keyOf[i] || !keyOf[j] || keyOf[i] === keyOf[j]) continue;
+            const A = bb[i], B = bb[j], m = MG * S;
+            if (A.c + m < B.a || B.c + m < A.a || A.d + m < B.b || B.d + m < A.b) continue;
+            const c = new CL.Clipper(); c.AddPaths(offO[i], CL.PolyType.ptSubject, true); c.AddPaths(offO[j], CL.PolyType.ptClip, true);
+            const o = new CL.Paths(); c.Execute(CL.ClipType.ctIntersection, o, CL.PolyFillType.pftNonZero, CL.PolyFillType.pftNonZero);
+            let a = 0; o.forEach(pp => a += Math.abs(CL.Clipper.Area(pp)));
+            if (a > 0.01 * S * S) rep.orderGaps.push('placa ' + (si + 1) + ': ' + keyOf[i] + '/' + keyOf[j]);
+          }
         });
         // un pedido que cabe en una placa no se reparte entre placas
         const where = {};
@@ -217,8 +225,8 @@ async function main() {
     assert(r.join() === '2,2,2', 'cantidades: ' + r);
   });
   await test('código de pedido desde ref o nombre de archivo (como lo rotula VCarve)', async () => {
-    const r = await page.evaluate(() => [orderKeyOf({ ref: 'BDKGQVISY-1' }), orderKeyOf({ fileName: 'GCTKASPDM-2-Roberto-Merani.pdf', label: 'PDF 3' }), orderKeyOf({ ref: 'PED-001' }), orderKeyOf({ label: 'Rect 2' }), orderMatColor({ matLabel: 'Plancha De Pvc 3mm Pvc Negro' }), sheetTitleText('PVC', 3, 'NEGRO')]);
-    assert(JSON.stringify(r) === JSON.stringify(['BDKGQVISY', 'GCTKASPDM', 'PED-001', '', 'NEGRO', 'PVC 3MM NEGRO']), JSON.stringify(r));
+    const r = await page.evaluate(() => [orderKeyOf({ ref: 'BDKGQVISY-1' }), orderKeyOf({ fileName: 'GCTKASPDM-2-Roberto-Merani.pdf', label: 'PDF 3' }), orderKeyOf({ ref: 'PED-001' }), orderKeyOf({ label: 'Rect 2' }), orderMatColor({ matLabel: 'Plancha De Pvc 3mm Pvc Negro' }), sheetTitleText('PVC', 3, 'NEGRO'), orderKeyOf({ fileName: 'HMWHXBAPZ_554567_repeticion_20261027-085344_818.ai', label: 'PDF 1' }), orderKeyOf({ ref: 'MI_PEDIDO_2' })]);
+    assert(JSON.stringify(r) === JSON.stringify(['BDKGQVISY', 'GCTKASPDM', 'PED-001', '', 'NEGRO', 'PVC 3MM NEGRO', 'HMWHXBAPZ', 'MI_PEDIDO_2']), JSON.stringify(r));
   });
   await test('colores de pedido distintos y exactos en ACI (mismo color en VCarve)', async () => {
     const r = await page.evaluate(() => { const ps = Array.from({ length: 20 }, (_, i) => ({ ref: 'ORDER' + String.fromCharCode(65 + i) + 'XX-1' })); const m = orderColorMap(ps); const cols = ps.map(p => orderColorOf(p, m)); return { uniq: new Set(cols).size, aci: new Set(cols.map(hexToACI)).size, exact: cols.every(c => aciHex(hexToACI(c)) === c) }; });
@@ -235,13 +243,13 @@ async function main() {
     return out.length;
   }, synth);
   assert(synthOrders > 0, 'sin piezas sintéticas');
-  await test('9 pedidos sintéticos: sin solapes, dentro de placa, bloques que no se pisan', async () => {
+  await test('9 pedidos sintéticos: sin solapes, dentro de placa, pasillo entre pedidos', async () => {
     const r = await page.evaluate(async () => { const t = performance.now(); const sh = await nestWithRetales(__synth, 2000, 3000, 5, null, []); return { ms: performance.now() - t, grouped: !!sh._grouped, sheets: sh.length, a: __t.audit(sh, 2000, 3000, 5), inst: __synth.reduce((s, p) => s + p.quantity, 0) }; });
     assert(r.grouped, 'no entró el motor por bloques');
     assert(r.a.pieces === r.inst, 'piezas colocadas ' + r.a.pieces + ' de ' + r.inst);
     assert(!r.a.overlaps.length, 'solapes/separación < hueco: ' + r.a.overlaps.slice(0, 5).join(', '));
     assert(!r.a.outside, r.a.outside + ' puntos fuera de placa');
-    assert(!r.a.blockOverlaps.length, 'bloques que se pisan: ' + r.a.blockOverlaps.join(', '));
+    assert(!r.a.orderGaps.length, 'pedidos sin pasillo entre ellos: ' + r.a.orderGaps.slice(0, 5).join(', '));
     assert(!r.a.orderSplit.length, 'pedidos repartidos entre placas: ' + r.a.orderSplit.join(', '));
     assert(r.ms < 15000, 'demasiado lento: ' + Math.round(r.ms) + ' ms');
   });
@@ -249,7 +257,7 @@ async function main() {
     const r = await page.evaluate(async () => { const sh = await nestWithRetales(__synth, 350, 450, 5, null, []); return { sheets: sh.length, a: __t.audit(sh, 350, 450, 5), inst: __synth.reduce((s, p) => s + p.quantity, 0), over: sh._oversized || null }; });
     assert(r.sheets > 1, 'debería necesitar varias placas');
     assert(r.a.pieces === r.inst, 'piezas colocadas ' + r.a.pieces + ' de ' + r.inst + ' ' + JSON.stringify(r.over));
-    assert(!r.a.overlaps.length && !r.a.outside && !r.a.blockOverlaps.length, JSON.stringify(r.a).slice(0, 300));
+    assert(!r.a.overlaps.length && !r.a.outside && !r.a.orderGaps.length, JSON.stringify(r.a).slice(0, 300));
   });
   await test('piezas giradas 90/180/270 se dibujan donde reservó el motor', async () => {
     const r = await page.evaluate(async () => {
@@ -259,6 +267,68 @@ async function main() {
     });
     assert(r.rots.some(x => x), 'no se giró ninguna pieza: ' + r.rots);
     assert(!r.a.overlaps.length && !r.a.outside, JSON.stringify(r.a).slice(0, 300));
+  });
+  // ── v102: giros finos y bloques por silueta ──
+  const svgPoly = (pts, w, h) => '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + 'mm" height="' + h + 'mm" viewBox="0 0 ' + w + ' ' + h + '"><polygon points="' + pts + '"/></svg>';
+  const svgL = svgPoly('0,0 300,0 300,600 900,600 900,900 0,900', 900, 900); // L de 900 con brazos de 300
+  const svgRombo = svgPoly('212.132,0 424.264,212.132 212.132,424.264 0,212.132', 424.264, 424.264); // cuadrado de 300 a 45°
+  const svgCuadro = svgPoly('0,0 420,0 420,420 0,420', 420, 420);
+  await test('giro fino 15/30/45°: exportación y lienzo pintan la pieza donde la reservó el motor', async () => {
+    const r = await page.evaluate(async svg => {
+      const p0 = { ...parseSVG(svg).pieces[0], id: 'LFINA' };
+      let worst = 0, worstEd = 0, n = 0;
+      const check = async p => {
+        const T = obPieceType(p, 2.9, 5, [0, 15, 30, 45]);
+        const sheet = { pieces: [] };
+        for (let a = 0; a < T.masks.length; a++) {
+          const x = 150 + a * 1100, y = 300;
+          const pc = { ...p, x, y, placedW: T.dim[a].w, placedH: T.dim[a].h, drawW: T.dim[a].w, drawH: T.dim[a].h, rotated: T.ang[a] !== 0, rotation: T.ang[a] };
+          const g = __t.bbox(pieceToPolylinesMM(pc).polylines);
+          const s = __t.bbox(obPlacedSolid(T, a, x, y).map(path => path.map(q => ({ x: q.X, y: q.Y }))));
+          worst = Math.max(worst, Math.abs(g.x - s.x), Math.abs(g.y - s.y), Math.abs(g.w - s.w), Math.abs(g.h - s.h));
+          sheet.pieces.push(pc);
+          n++;
+        }
+        // lienzo: el objeto del editor (girado sobre su centro) cae sobre la misma geometría
+        const { objs } = await placedToEditorObjects([sheet], 20000, 2000, true);
+        objs.forEach((o, i) => {
+          const e = boundsOf(worldSubpaths(o)), g = __t.bbox(pieceToPolylinesMM(sheet.pieces[i]).polylines);
+          worstEd = Math.max(worstEd, Math.abs(e.minX - g.x), Math.abs(e.minY - g.y), Math.abs(e.maxX - g.x - g.w), Math.abs(e.maxY - g.y - g.h));
+        });
+      };
+      await check(p0);
+      await check({ ...p0, w: p0.w * 1.5 }); // caja sin la proporción del dibujo: la escala no cambia al girar
+      return { worst, worstEd, n };
+    }, svgL);
+    assert(r.n === 32, r.n + ' orientaciones');
+    assert(r.worst < 0.25, 'exportación ≠ motor: ' + r.worst.toFixed(3) + ' mm');
+    assert(r.worstEd < 0.6, 'lienzo ≠ motor: ' + r.worstEd.toFixed(3) + ' mm');
+  });
+  await test('giro fino ahorra placa: 9 rombos caben en 1000×1000 a 15° (a 90° no)', async () => {
+    const r = await page.evaluate(async svg => {
+      const pcs = orderToPieces({ ref: 'ROMBOSAAA-1', fileName: 'ROMBOSAAA-1-x.svg', qty: 9 }, parseSVG(svg).pieces, 'PVC');
+      const prev = __NEST_CFG__.rotStep;
+      const run = async st => {
+        __NEST_CFG__.rotStep = st;
+        const sh = await nestWithRetales(pcs, 1000, 1000, 5, null, []);
+        return { n: sh.length, step: sh._rotStep, rots: [...new Set(sh.flatMap(x => x.pieces.map(p => p.rotation)))], a: __t.audit(sh, 1000, 1000, 5) };
+      };
+      try { return { r90: await run(90), r15: await run(15) }; } finally { __NEST_CFG__.rotStep = prev; }
+    }, svgRombo);
+    assert(r.r90.n > 1, 'a 90° deberían hacer falta varias placas: ' + JSON.stringify(r.r90));
+    assert(r.r15.n === 1 && r.r15.step === 15, 'a 15° deberían caber en una: ' + JSON.stringify({ n: r.r15.n, step: r.r15.step }));
+    assert(r.r15.rots.some(x => x % 90), 'ningún giro fino: ' + r.r15.rots);
+    for (const k of ['r90', 'r15']) assert(r[k].a.pieces === 9 && !r[k].a.overlaps.length && !r[k].a.outside, k + ' ' + JSON.stringify(r[k].a).slice(0, 300));
+  });
+  await test('silueta: un pedido entra en la ensenada de la L de otro, con pasillo (caja contra caja: 2 placas)', async () => {
+    const r = await page.evaluate(async ({ L, Q }) => {
+      const pcs = [...orderToPieces({ ref: 'ELESEGUNA-1', fileName: 'ELESEGUNA-1-x.svg', qty: 1 }, parseSVG(L).pieces, 'PVC'), ...orderToPieces({ ref: 'CUADRITOS-1', fileName: 'CUADRITOS-1-x.svg', qty: 1 }, parseSVG(Q).pieces, 'PVC')];
+      const sh = await nestWithRetales(pcs, 1000, 1000, 5, null, []);
+      return { n: sh.length, mode: sh._mode, keys: sh.map(x => [...new Set(x.pieces.map(orderKeyOf))]), a: __t.audit(sh, 1000, 1000, 5) };
+    }, { L: svgL, Q: svgCuadro });
+    assert(r.n === 1, 'deberían compartir placa: ' + JSON.stringify(r));
+    assert(/silueta/.test(r.mode), 'modo ' + r.mode);
+    assert(!r.a.overlaps.length && !r.a.outside && !r.a.orderGaps.length, JSON.stringify(r.a).slice(0, 300));
   });
   await test('rótulos fuera de la placa y título encima', async () => {
     const r = await page.evaluate(async () => {
@@ -317,8 +387,9 @@ async function main() {
       for (const b of r) {
         assert(b.grouped, b.k + ': no entró el motor por bloques');
         assert(!b.a.overlaps.length && !b.a.outside, b.k + ': ' + JSON.stringify({ ov: b.a.overlaps.slice(0, 3), out: b.a.outside }));
+        assert(!b.a.orderGaps.length, b.k + ': pedidos sin pasillo ' + b.a.orderGaps.slice(0, 3).join(', '));
         assert(b.a.pieces === b.inst || b.over, b.k + ': colocadas ' + b.a.pieces + ' de ' + b.inst);
-        assert(b.ms < 20000, b.k + ': ' + b.ms + ' ms');
+        assert(b.ms < 30000, b.k + ': ' + b.ms + ' ms'); // v102: la pasada fina se corta a los 26 s
       }
       console.log('      ' + r.map(b => b.k + ' ' + b.inst + ' pzs ' + b.ms + ' ms').join(' · '));
     });
@@ -574,6 +645,28 @@ async function main() {
   });
   await UI.close();
 
+  await test('selector de giro (v102): 15° por defecto, se recuerda y se apaga sin agrupar por pedido', async () => {
+    const Q = await newPage({ viewport: { width: 1600, height: 1100 } }); // contexto propio: no toca el localStorage del resto
+    try {
+      const sel = () => Q.pg.locator('[data-testid=rot-step]');
+      const conPieza = async () => { await Q.pg.click('button:has-text("＋ Manual")'); await sel().waitFor({ timeout: 10000 }); }; // las opciones salen con piezas
+      await conPieza();
+      assert((await sel().inputValue()) === '15', 'por defecto: ' + (await sel().inputValue()));
+      assert((await sel().locator('option').allInnerTexts()).join() === '15°,30°,45°,90°', 'opciones');
+      await sel().selectOption('90');
+      assert((await Q.pg.evaluate(() => __NEST_CFG__.rotStep)) === 90, 'no llegó a la configuración del motor');
+      await Q.pg.reload({ waitUntil: 'domcontentloaded' });
+      await Q.pg.waitForFunction(() => typeof buildOrderGroups === 'function' && document.querySelector('#root').children.length > 0);
+      await Q.pg.evaluate(() => { const f = document.getElementById('rn-panel-frame'); if (f) f.style.display = 'none'; }); // demo: panel de entrada
+      await conPieza();
+      assert((await sel().inputValue()) === '90' && (await Q.pg.evaluate(() => __NEST_CFG__.rotStep)) === 90, 'no se recordó al recargar');
+      const grp = Q.pg.locator('label', { hasText: 'Agrupar por pedido' }).locator('input');
+      await grp.uncheck();
+      assert(await sel().isDisabled(), 'sin agrupar por pedido el giro fino no aplica');
+      await grp.check();
+      assert(!(await sel().isDisabled()), 'vuelve a activarse');
+    } finally { await Q.close(); }
+  });
   await test('móvil 390×844: pestaña táctil y visor completo por encima de la barra LOTES', async () => {
     const M = await newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     try {

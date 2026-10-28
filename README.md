@@ -86,6 +86,29 @@ Lo que sale del nesting (lienzo, DXF, SVG y PDF) queda maquetado como se hace a 
   no comparten placa.
 - La **cantidad** de un pedido multiplica TODAS sus piezas (antes solo la primera).
 
+## Aprovechar el material sin dejar de agrupar (v102)
+
+Un lote real de Opal 8 (8 pedidos, 68 letras con cajeado) que VCarve saca en 2 placas gastaba 3
+con v101; con v102 sale en 2, cada pedido en su bloque y con su rótulo fuera de la placa.
+
+- **Giros finos** de las piezas, 15° por defecto, como el «paso de rotación» de VCarve. Selector
+  **Giro** junto a «Agrupar por pedido» (15° · 30° · 45° · 90°; 90° = solo derechas o tumbadas,
+  para materiales con veta o impresos). Una letra solo se gira si gana sitio de verdad.
+- **Dos criterios** por pedido: lo más arriba posible y el centro de masas más arriba (la «A»
+  que se acomoda en la diagonal de otra). Se queda lo mejor de cada uno.
+- **Bloque por silueta**: el bloque de un pedido ocupa su silueta cerrada (los huecos estrechos
+  entre sus letras quedan cerrados), no su rectángulo, así que otro pedido puede entrar en la
+  ensenada que deja una «L» o un bloque escalonado. Entre pedidos queda siempre un pasillo
+  (≥ hueco + ~12 mm).
+- **Dos pasadas con tiempo medido**: primero 0/90/180/270 (resultado seguro, mide la máquina) y
+  después la fina si cabe en el presupuesto (15° → 30° → 45°; los lotes de más de 300 piezas no
+  bajan de 30°), con tope duro de 26 s. Gana la que gasta menos placas y, a igualdad, deja la
+  última más libre y más arriba (un retal aprovechable).
+- El lienzo, el DXF/SVG/PDF y el estimado dibujan cada giro fino exactamente donde lo reservó el
+  motor.
+- El código de pedido de los archivos de repetición del panel
+  (`HMWHXBAPZ_554567_repeticion_…`) se rotula como `HMWHXBAPZ`.
+
 ## Piezas a cortar por pedido (v101)
 
 La lista «PIEZAS A CORTAR» se agrupa por pedido en pestañas plegables:

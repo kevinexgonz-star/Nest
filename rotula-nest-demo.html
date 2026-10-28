@@ -1,7 +1,22 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v101 — Nesting · Editor · Capas                 ║
+     ║  ROTULA NEST v102 — Nesting · Editor · Capas                 ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v102: NESTING QUE APROVECHA EL MATERIAL SIN DEJAR DE        ║
+     ║  AGRUPAR POR PEDIDO. Un lote real de Opal 8 (8 pedidos, 68   ║
+     ║  letras) que VCarve saca en 2 placas aqui gastaba 3; ahora   ║
+     ║  2. (1) Giros finos de las piezas, 15 grados por defecto     ║
+     ║  como el paso de rotacion de VCarve (selector Giro:          ║
+     ║  15/30/45/90). (2) Cada pedido se empaqueta con dos          ║
+     ║  criterios (lo mas arriba y el centro de masas) y se queda   ║
+     ║  lo mejor. (3) El bloque ocupa su silueta cerrada, no su     ║
+     ║  rectangulo: otro pedido entra en la ensenada que deja, con  ║
+     ║  pasillo. (4) Dos pasadas: 0/90/180/270 segura y la fina si  ║
+     ║  cabe en el tiempo medido (15, 30 o 45 grados; tope duro 26  ║
+     ║  s). pieceToPolylinesMM y el lienzo dibujan los giros finos  ║
+     ║  donde los reservo el motor. El codigo de pedido de los      ║
+     ║  archivos de repeticion (HMWHXBAPZ_554567_...) se rotula     ║
+     ║  corto.                                                      ║
      ║  v101: PIEZAS A CORTAR POR PEDIDO. La lista se agrupa en     ║
      ║  pestanas plegables, una por pedido: color, codigo, cliente, ║
      ║  piezas/uds y placa donde quedo. Abierta muestra sus piezas  ║
@@ -8981,7 +8996,11 @@ const __NEST_CFG__ = {
      boca abajo —cara vista contra la bancada—, así que el DXF tiene que llevarlas en espejo,
      igual que se maquetan en VCarve. Se aplica en los tres importadores (PDF/AI, DXF, SVG)
      sobre la geometría de origen, así nesting, lienzo, editor y exportación ven lo mismo. */
-  mirror: true
+  mirror: true,
+  /* v102: paso de giro de las piezas al agrupar por pedido (el "paso de rotación" de VCarve):
+     15 = una letra se inclina donde encaja mejor; 90 = solo derechas o tumbadas (veta,
+     impresos). Si el lote es grande el motor lo engorda (30°, 45°) o se queda en 90°. */
+  rotStep: 15
 };
 if (typeof window !== 'undefined') window.__NEST_CFG__ = __NEST_CFG__;
 /* demo-12: sistema de RETALES oculto "por ahora". Un solo interruptor lo apaga por completo:
@@ -9070,7 +9089,10 @@ const refOf = p => {
    códigos alfanuméricos largos del panel; una referencia libre ("PED-001") queda intacta. */
 const orderCodeOf = ref => {
   const s = String(ref == null ? "" : ref).trim();
-  const m = /^([A-Z0-9]{6,})-\d{1,3}$/i.exec(s);
+  const m = /^([A-Z0-9]{6,})-\d{1,3}$/i.exec(s) ||
+  // v102: archivo de repetición del panel ("HMWHXBAPZ_554567_repeticion_20261027-085344_818"):
+  // el código son las letras del principio; el resto alargaba el rótulo y ensanchaba la maqueta
+  /^([A-Z]{6,12})_\d{3,}_/i.exec(s);
   return m ? m[1] : s;
 };
 // Solo hay pedido si la pieza trae referencia o archivo de origen: una forma dibujada en el
@@ -12155,26 +12177,47 @@ async function nestPiecesNFP(pieces, W, H, gap, onProgress) {
    El fresador recoge pedido a pedido sin clasificar letras sueltas.
 
    Motor RASTER de forma real (no por caja envolvente):
-     1. Cada pieza se rasteriza UNA vez a 0° sobre una rejilla de R mm, inflada gap/2 más
-        media diagonal de celda: una celda se marca si su centro cae dentro del contorno
-        inflado. Así toda celda que el contorno inflado gap/2 toque queda marcada, y dos
-        piezas con celdas disjuntas quedan SIEMPRE a ≥ gap (garantía, no estimación).
+     1. Cada pieza se rasteriza sobre una rejilla de R mm, inflada gap/2 más media diagonal
+        de celda: una celda se marca si su centro cae dentro del contorno inflado. Así toda
+        celda que el contorno inflado gap/2 toque queda marcada, y dos piezas con celdas
+        disjuntas quedan SIEMPRE a ≥ gap (garantía, no estimación).
      2. 90/180/270° se obtienen GIRANDO LAS CELDAS, no re-rasterizando: el giro de un bloque
         entero es entonces exacto en celdas y no puede crear solapes.
      3. Cada pedido se empaqueta (arriba-izquierda, forma real) en una franja; se prueban
         varios anchos y se queda el bloque más compacto.
-     4. Los bloques se colocan en la placa como su RECTÁNGULO (un pedido no se mete entre las
-        letras de otro), con el mismo criterio, en 4 giros, probando varios órdenes y
-        quedándose el que gasta menos placa. Al estamparlos se dilatan OB_ORDER_GAP_MM: entre
-        pedidos queda más aire que entre letras del mismo pedido.
+     4. Los bloques se colocan en la placa en 4 giros, probando varios órdenes y quedándose
+        el que gasta menos placa. Al estamparlos se dilatan OB_ORDER_GAP_MM: entre pedidos
+        queda más aire que entre letras del mismo pedido.
      5. Red final con la geometría REAL de cada pieza (obFindOverlap): si algo se pisara, el
         lote cae al nesting normal en vez de mandar un solape a la fresadora.
    Un pedido que no cabe entero en la placa libre pasa a placa nueva; si no cabe ni en una
-   placa vacía se reparte por placas (bloques de continuación). */
+   placa vacía se reparte por placas (bloques de continuación).
+
+   v102 · APROVECHAR EL MATERIAL SIN DEJAR DE AGRUPAR (un lote de Opal 8 que VCarve sacaba
+   en 2 placas aquí gastaba 3):
+     · Giros FINOS de las piezas (15° por defecto, como el "paso de rotación" de VCarve):
+       las letras en diagonal encajan unas en otras. El bloque entero sigue girando 90°.
+     · Cada pedido se empaqueta con dos criterios —lo más arriba posible y el centro de masas
+       más arriba— y se queda lo mejor de cada uno (ninguno gana siempre).
+     · El bloque ocupa su SILUETA cerrada (obClose), no su rectángulo: otro pedido puede
+       ocupar la ensenada que deja una "L" o un bloque escalonado, con su pasillo, sin
+       meterse entre las letras.
+     · Dos pasadas: A con 0/90/180/270 (resultado seguro, mide la máquina) y B con giros
+       finos si caben en OB_BUDGET_MS según lo que tardó A (15° → 30° → 45°), con tope duro
+       OB_HARD_MS. Gana la que gasta menos placas y deja más libre la última. */
 const OB_ORDER_GAP_MM = 12;
 const OB_ROTATE_BIAS_MM = 15; // lo que tiene que subir una pieza girada para preferirla a derechas
 const OB_BLOCK_ROTATE_BIAS_MM = 150; // ídem para girar un bloque entero (todas sus letras)
 const OB_ROTS = [0, 90, 180, 270];
+const OB_CLOSE_MM = 40; // v102: huecos de menos de ~2×40 mm entre letras de un pedido no admiten otro pedido
+const OB_ROT_STEPS = [15, 30, 45, 90]; // v102: pasos de giro admitidos (__NEST_CFG__.rotStep)
+const OB_FITS = ["cog", "top"]; // v102: criterios de empaquetado de cada pedido
+const OB_ASSEMBLY = [[false, false], [true, false], [true, true]]; // v102: [silueta, borde inferior]
+const OB_WIDTHS = [0.5, 0.75, 1, 1.35, 1.9, 2.6]; // anchos de franja (× lado del cuadrado equivalente)
+const OB_WIDTHS_FINE = [0.75, 1, 1.35, 1.9]; // v102: en la pasada fina, menos franjas (cada una cuesta ×6)
+const OB_BUDGET_MS = 16000; // v102: la pasada fina solo arranca si se estima dentro de esto
+const OB_HARD_MS = 26000; // v102: y se descarta si llega aquí (el vigilante de runNesting corta a 35 s)
+const OB_FINE_MAX_Q = 300; // v102: con más piezas que esto el giro fino no baja de 30°
 /* mm por celda: ~700k celdas por placa (2000×3000 → 2,9 mm). Más fino = más denso y lento. */
 function obResolution(W, H) {
   return Math.min(5, Math.max(1.5, Math.sqrt(W * H / 700000)));
@@ -12298,9 +12341,15 @@ function obInflatedOutline(polylines, w, h, inflate, pad) {
   const toMM = (paths, k) => paths.map(path => path.map(p => ({ x: p.X / S + k, y: p.Y / S + k })));
   return { polys: toMM(footprint(inflate), pad), solid: toMM(footprint(0.02), 0) };
 }
-/* Las cuatro orientaciones de una pieza. off[r] = esquina de la caja girada de la pieza
-   dentro del marco girado de su máscara (mm): es lo que convierte celda → posición. */
-function obPieceType(piece, R, gap) {
+/* Orientaciones de una pieza. Índice a = b·4 + k ↔ ángulo base[b] + 90k, en sentido horario
+   (el de rotate() en SVG y en el lienzo). Solo se rasteriza cada ángulo base; k > 0 sale
+   GIRANDO LAS CELDAS, así que girar un bloque entero 90° sigue siendo exacto. v102: además
+   de base 0 (0/90/180/270), los giros finos (15°, 30°…) que añade obAddAngles en la pasada
+   fina. off[a] = esquina de la caja del RECTÁNGULO w×h girado dentro del marco de su máscara
+   y dim[a] = medidas de esa caja: es el hueco que se reporta como placedW×placedH, y
+   pieceToPolylinesMM y el lienzo giran el dibujo sobre el centro de ese rectángulo, así que
+   motor, lienzo y exportación coinciden al milímetro también con giros finos. */
+function obPieceType(piece, R, gap, base) {
   const w = +piece.w || 0, h = +piece.h || 0;
   if (!(w > 0 && h > 0)) return null;
   // aplanado puro JS (rápido, flecha ≤ 0,05 mm); el muestreo por DOM queda de respaldo
@@ -12313,21 +12362,49 @@ function obPieceType(piece, R, gap) {
   }
   // gap/2 + media diagonal de celda (cobertura conservadora) + flecha de los arcos del offset
   const d = Math.max(0, gap) / 2 + R * Math.SQRT1_2 + 0.15;
-  const mw = Math.max(1, Math.ceil((w + 2 * d) / R)), mh = Math.max(1, Math.ceil((h + 2 * d) / R));
-  const outl = obInflatedOutline(polylines, w, h, d, d);
-  let m0 = obMaskFromBits(obRasterize(outl.polys, mw, mh, R), mw, mh);
-  if (!m0.area) m0 = obRectMask(mw, mh); // sin huella rasterizable: la caja entera, nunca nada
-  const masks = [m0];
-  for (let k = 1; k < 4; k++) masks.push(obRotCW(masks[k - 1]));
-  const Fw = mw * R, Fh = mh * R;
-  const off = [{ x: d, y: d }, { x: Fh - d - h, y: d }, { x: Fw - d - w, y: Fh - d - h }, { x: d, y: Fw - d - w }];
-  return { piece, w, h, masks, off, solid: outl.solid };
+  const outl = obInflatedOutline(polylines, w, h, d, 0);
+  const T = { piece, w, h, cx: w / 2, cy: h / 2, R, polys: outl.polys, solid: outl.solid, masks: [], off: [], dim: [], ang: [], base: [] };
+  obAddAngles(T, base || [0]);
+  return T;
 }
-/* Silueta maciza de la pieza ya colocada (giro q·90° horario y caja girada en x,y), en mm. */
-function obPlacedSolid(T, q, x, y) {
-  const { w, h } = T;
-  const f = q === 1 ? (p => ({ X: x + h - p.y, Y: y + p.x })) : q === 2 ? (p => ({ X: x + w - p.x, Y: y + h - p.y })) : q === 3 ? (p => ({ X: x + p.y, Y: y + w - p.x })) : (p => ({ X: x + p.x, Y: y + p.y }));
-  return T.solid.map(path => path.map(f));
+function obAddAngles(T, base) {
+  const { w, h, cx, cy, R } = T;
+  for (const b of base) {
+    if (T.base.indexOf(b) >= 0) continue;
+    T.base.push(b);
+    const t = b * Math.PI / 180, c = Math.cos(t), s = Math.sin(t);
+    let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+    const rp = T.polys.map(poly => poly.map(p => {
+      const x = cx + (p.x - cx) * c - (p.y - cy) * s, y = cy + (p.x - cx) * s + (p.y - cy) * c;
+      if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y;
+      return { x, y };
+    }));
+    const mw = Math.max(1, Math.ceil((bx1 - bx0) / R)), mh = Math.max(1, Math.ceil((by1 - by0) / R));
+    let m = obMaskFromBits(obRasterize(rp.map(poly => poly.map(p => ({ x: p.x - bx0, y: p.y - by0 }))), mw, mh, R), mw, mh);
+    if (!m.area) m = obRectMask(mw, mh); // sin huella rasterizable: la caja entera, nunca nada
+    const ac = Math.abs(c), as = Math.abs(s);
+    let sw = w * ac + h * as, sh = w * as + h * ac;
+    let o = { x: cx - sw / 2 - bx0, y: cy - sh / 2 - by0 };
+    const quad = [];
+    for (let k = 0; k < 4; k++) {
+      T.masks.push(m); T.off.push(o); T.dim.push({ w: sw, h: sh }); T.ang.push((b + 90 * k) % 360);
+      quad.push(m);
+      if (k === 3) break;
+      // giro horario del marco Fw×Fh: (x, y) → (Fh − y, x)
+      o = { x: m.h * R - o.y - sh, y: o.x };
+      m = obRotCW(m);
+      const t2 = sw; sw = sh; sh = t2;
+    }
+    for (const q of quad) q.bits = null; // ya no hacen falta (las celdas viven en rows): memoria
+  }
+}
+/* Silueta maciza de la pieza ya colocada (orientación a, caja girada en x,y), en mm. */
+function obPlacedSolid(T, a, x, y) {
+  const t = T.ang[a] * Math.PI / 180, c = Math.cos(t), s = Math.sin(t), ex = T.dim[a].w / 2, ey = T.dim[a].h / 2;
+  return T.solid.map(path => path.map(p => {
+    const dx = p.x - T.cx, dy = p.y - T.cy;
+    return { X: x + ex + dx * c - dy * s, Y: y + ey + dx * s + dy * c };
+  }));
 }
 /* Comprobación final con la geometría REAL de cada pieza (todas sus formas: path, polygon,
    rect, circle…), no con el rectángulo de respaldo que usa _sheetsArtworkOverlap para lo que
@@ -12364,6 +12441,7 @@ function obFindOverlap(placed) {
    la derecha. Probar un span cuesta una lectura, y si falla dice cuánto saltar. */
 function obGrid(gw, gh) {
   const run = new Int32Array(gw * gh), occ = new Uint8Array(gw * gh), rowMax = new Int32Array(gh);
+  let free = gw * gh;
   for (let y = 0; y < gh; y++) { for (let x = 0; x < gw; x++) run[y * gw + x] = gw - x; rowMax[y] = gw; }
   const fixRow = y => {
     let r = 0, mx = 0;
@@ -12413,39 +12491,75 @@ function obGrid(gw, gh) {
       if (!sp.length) continue;
       for (let s = 0; s < sp.length; s += 2) {
         const a = Math.max(0, x + sp[s]), b = Math.min(gw - 1, x + sp[s + 1]);
-        for (let i = a; i <= b; i++) occ[yy * gw + i] = 1;
+        for (let i = a; i <= b; i++) { const c = yy * gw + i; if (!occ[c]) { occ[c] = 1; free--; } }
       }
       fixRow(yy);
     }
   };
-  return { gw, gh, find, stamp };
+  return { gw, gh, find, stamp, get free() { return free; } }; // v102: celdas libres (descartar placas llenas)
 }
 /* Mejor colocación de una máscara entre sus giros: la más arriba y, a igualdad, la más a
    la izquierda (abajo-izquierda clásico, con la gravedad hacia el borde superior de la
-   placa). Un giro distinto del original solo gana si sube al menos `bias` celdas: las letras
-   quedan DERECHAS salvo que girarlas aproveche un hueco de verdad, como en la maqueta a mano
-   (ordenar por "borde inferior" las tumbaba todas). */
-function obBestFit(grid, masks, rots, bias) {
+   placa). Un giro distinto del original solo gana si sube al menos `bias` celdas. Es la de
+   los BLOQUES enteros (4 giros); las piezas usan obBestFitPiece. */
+function obBestFit(grid, masks, rots, bias, bottomCap) {
   let best = null;
   const pen = q => q ? bias || 0 : 0;
   for (const q of rots) {
     const m = masks[q];
     if (!m) continue;
-    const pos = grid.find(m, best ? best.score - pen(q) : null);
+    // v102: con bottomCap solo interesan posiciones cuyo borde inferior quede por encima
+    let maxY = best ? best.score - pen(q) : null;
+    if (bottomCap != null) maxY = Math.min(maxY == null ? Infinity : maxY, bottomCap - m.h - 1);
+    if (maxY != null && maxY < 0) continue;
+    const pos = grid.find(m, maxY);
     if (!pos) continue;
     const score = pos.y + pen(q);
     if (!best || score < best.score || score === best.score && pos.x < best.x) best = { q, x: pos.x, y: pos.y, score };
   }
   return best;
 }
+/* v102: fila del centro de masas de una máscara (celdas), cacheada. */
+function obCog(m) {
+  if (m.cog == null) {
+    let s = 0;
+    for (let j = 0; j < m.h; j++) {
+      const sp = m.rows[j];
+      let n = 0;
+      for (let k = 0; k < sp.length; k += 2) n += sp[k + 1] - sp[k] + 1;
+      s += n * (j + 0.5);
+    }
+    m.cog = m.area ? s / m.area : m.h / 2;
+  }
+  return m.cog;
+}
+/* v102: mejor orientación de una PIEZA. Puntúa la fila de la posición + penalización por
+   girarla + la fila de referencia de su máscara según `fit`: "top" = su borde superior (el
+   criterio de v100: lo más arriba posible) o "cog" = su centro de masas (la orientación que
+   mejor se ACOMODA en el hueco: una "A" tumbada en la diagonal de otra). Ninguno gana
+   siempre, por eso cada pedido se empaqueta con los dos (obFormBlock/nestByOrderBlocks). */
+function obBestFitPiece(grid, T, idxs, pen, fit) {
+  let best = null;
+  for (const a of idxs) {
+    const m = T.masks[a];
+    if (!m) continue;
+    const p = pen(a) + (fit === "cog" ? obCog(m) : 0);
+    const pos = grid.find(m, best ? Math.floor(best.score - p) : null);
+    if (!pos) continue;
+    const score = pos.y + p;
+    if (!best || score < best.score || score === best.score && pos.x < best.x) best = { q: a, x: pos.x, y: pos.y, score };
+  }
+  return best;
+}
 /* Empaqueta las instancias de un pedido en una franja gw×gh. */
-function obPackOrder(insts, types, gw, gh, bias) {
+async function obPackOrder(insts, types, gw, gh, pen, idxs, fit, breathe) {
   const grid = obGrid(gw, gh);
   const placements = [], left = [];
   let usedW = 0, usedH = 0;
   for (const inst of insts) {
     const T = types[inst.t];
-    const best = obBestFit(grid, T.masks, [0, 2, 1, 3], bias);
+    const best = obBestFitPiece(grid, T, idxs, pen, fit);
+    if (breathe) await breathe();
     if (!best) { left.push(inst); continue; }
     const m = T.masks[best.q];
     grid.stamp(m, best.x, best.y);
@@ -12458,10 +12572,10 @@ function obPackOrder(insts, types, gw, gh, bias) {
 /* Bloques candidatos de un pedido: se empaqueta en franjas de varios anchos y cada franja
    que lo admite entero da un candidato, ordenados de más a menos compacto (área de la caja,
    con castigo suave a los bloques muy alargados y a las letras giradas). La placa prueba
-   los candidatos por ese orden: si el más compacto no cabe en el hueco libre, quizá uno
-   más estrecho o más bajo sí, antes de abrir placa nueva. Si el pedido no cabe entero ni a
-   ancho de placa, devuelve el trozo que cabe y el resto (continuación en otra placa). */
-function obFormBlock(insts, types, gw, gh, quick, bias) {
+   los candidatos: si el más compacto no cabe en el hueco libre, quizá uno más estrecho o
+   más bajo sí, antes de abrir placa nueva. Si el pedido no cabe entero ni a ancho de placa,
+   devuelve el trozo que cabe y el resto (continuación en otra placa). */
+async function obFormBlock(insts, types, gw, gh, quick, pen, idxs, fit, factors, breathe) {
   let area = 0, minSide = 1;
   for (const inst of insts) {
     const m = types[inst.t].masks[0];
@@ -12470,39 +12584,119 @@ function obFormBlock(insts, types, gw, gh, quick, bias) {
   }
   const side = Math.sqrt(area / 0.55);
   const widths = new Set([gw]);
-  if (!quick) for (const f of [0.5, 0.75, 1, 1.35, 1.9, 2.6]) widths.add(Math.max(minSide, Math.min(gw, Math.round(side * f))));
+  if (!quick) for (const f of factors) widths.add(Math.max(minSide, Math.min(gw, Math.round(side * f))));
   const cands = [];
   let full = null;
   for (const cw of [...widths].sort((a, b) => a - b)) {
-    const res = obPackOrder(insts, types, cw, gh, bias);
+    const res = await obPackOrder(insts, types, cw, gh, pen, idxs, fit, breathe);
     if (cw === gw) full = res;
     if (res.left.length || !res.placements.length) continue;
     // piezas giradas (ponderadas por superficie) también puntúan en contra: entre dos
     // bloques casi igual de compactos gana el de letras derechas
     let rotA = 0, allA = 0;
-    for (const pl of res.placements) { const a = types[pl.t].masks[0].area; allA += a; if (pl.q) rotA += a; }
+    for (const pl of res.placements) { const T = types[pl.t], a = T.masks[0].area; allA += a; if (T.ang[pl.q]) rotA += a; }
     const score = res.usedW * res.usedH * (1 + 0.12 * Math.abs(Math.log(res.usedW / Math.max(1, res.usedH)))) * (1 + 0.35 * rotA / Math.max(1, allA));
     if (cands.some(c => c.w === res.usedW && c.h === res.usedH)) continue; // mismo bloque otra vez
     cands.push({ placements: res.placements, w: res.usedW, h: res.usedH, score });
   }
   cands.sort((a, b) => a.score - b.score);
-  /* En la placa el bloque cuenta como su RECTÁNGULO, no como su silueta: con siluetas los
-     pedidos se encajaban unos en los huecos de otros y ya no se distinguía dónde acaba uno
-     y empieza el siguiente (ni se podía seleccionar un pedido con una ventana en VCarve). */
   if (cands.length) return { cands, left: [] };
   if (!full || !full.placements.length) return { cands: [], left: insts };
   return { cands: [{ placements: full.placements, w: full.usedW, h: full.usedH, score: 0 }], left: full.left };
 }
 const obRectMask = (w, h) => obMaskFromBits(new Uint8Array(w * h).fill(1), w, h);
+/* v102: SILUETA de un bloque = unión de las máscaras de sus piezas (ya infladas gap/2). */
+function obBlockSilhouette(c, types) {
+  const w = c.w, h = c.h, bits = new Uint8Array(w * h);
+  for (const pl of c.placements) {
+    const m = types[pl.t].masks[pl.q];
+    for (let r = 0; r < m.h; r++) {
+      const y = pl.gy + r;
+      if (y < 0 || y >= h) continue;
+      const sp = m.rows[r], o = y * w;
+      for (let s = 0; s < sp.length; s += 2) {
+        const a = Math.max(0, pl.gx + sp[s]), b = Math.min(w - 1, pl.gx + sp[s + 1]);
+        for (let i = a; i <= b; i++) bits[o + i] = 1;
+      }
+    }
+  }
+  return obMaskFromBits(bits, w, h);
+}
+/* v102: CIERRE morfológico (dilatar y erosionar k celdas, elemento cuadrado). Rellena los
+   huecos ESTRECHOS entre las letras de un pedido —ahí no debe colarse otro pedido: dejaría
+   de verse dónde acaba cada uno— y deja libres las ensenadas anchas de su caja, que es
+   justo lo que antes se perdía al tratar el bloque como su rectángulo. Nunca sale de la
+   caja del bloque ni quita celdas. */
+function obClose(m, k) {
+  if (!(k > 0)) return m;
+  const w = m.w, h = m.h, W = w + 2 * k, H = h + 2 * k;
+  const a = new Uint8Array(W * H);
+  for (let j = 0; j < h; j++) { const sp = m.rows[j], o = (j + k) * W + k; for (let s = 0; s < sp.length; s += 2) for (let i = sp[s]; i <= sp[s + 1]; i++) a[o + i] = 1; }
+  // dilatación: filas y luego columnas (distancia a la última celda marcada, en los dos sentidos)
+  const t = new Uint8Array(W * H), d = new Uint8Array(W * H);
+  for (let j = 0; j < H; j++) {
+    const o = j * W;
+    let last = -1e9;
+    for (let i = 0; i < W; i++) { if (a[o + i]) last = i; if (i - last <= k) t[o + i] = 1; }
+    last = 1e9;
+    for (let i = W - 1; i >= 0; i--) { if (a[o + i]) last = i; if (last - i <= k) t[o + i] = 1; }
+  }
+  for (let i = 0; i < W; i++) {
+    let last = -1e9;
+    for (let j = 0; j < H; j++) { if (t[j * W + i]) last = j; if (j - last <= k) d[j * W + i] = 1; }
+    last = 1e9;
+    for (let j = H - 1; j >= 0; j--) { if (t[j * W + i]) last = j; if (last - j <= k) d[j * W + i] = 1; }
+  }
+  // erosión: una celda queda si no hay ninguna vacía a ≤ k (fuera del marco cuenta como vacía)
+  const e1 = new Uint8Array(W * H), e2 = new Uint8Array(W * H);
+  for (let j = 0; j < H; j++) {
+    const o = j * W;
+    let last = -1;
+    for (let i = 0; i < W; i++) { if (!d[o + i]) last = i; e1[o + i] = i - last > k ? 1 : 0; }
+    last = W;
+    for (let i = W - 1; i >= 0; i--) { if (!d[o + i]) last = i; if (last - i <= k) e1[o + i] = 0; }
+  }
+  for (let i = 0; i < W; i++) {
+    let last = -1;
+    for (let j = 0; j < H; j++) { if (!e1[j * W + i]) last = j; e2[j * W + i] = j - last > k ? 1 : 0; }
+    last = H;
+    for (let j = H - 1; j >= 0; j--) { if (!e1[j * W + i]) last = j; if (last - j <= k) e2[j * W + i] = 0; }
+  }
+  const out = new Uint8Array(w * h);
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) out[j * w + i] = e2[(j + k) * W + i + k] | m.bits[j * w + i];
+  return obMaskFromBits(out, w, h);
+}
+/* Orientación de una pieza con su bloque girado q·90°: mismo ángulo base, k + q. */
+const obRotIdx = (a, q) => a & ~3 | a + q & 3;
 /* Coloca las piezas del bloque girado q·90° (en celdas, exacto): posición de su máscara
-   dentro del bloque girado y giro final de la pieza. */
+   dentro del bloque girado y orientación final de la pieza. */
 function obRotatePlacement(pl, types, bw, bh, q) {
   const m = types[pl.t].masks[pl.q];
   let gx = pl.gx, gy = pl.gy;
   if (q === 1) { gx = bh - pl.gy - m.h; gy = pl.gx; }
   else if (q === 2) { gx = bw - pl.gx - m.w; gy = bh - pl.gy - m.h; }
   else if (q === 3) { gx = pl.gy; gy = bw - pl.gx - m.w; }
-  return { t: pl.t, inst: pl.inst, q: (pl.q + q) % 4, gx, gy };
+  return { t: pl.t, inst: pl.inst, q: obRotIdx(pl.q, q), gx, gy };
+}
+/* v102: área maciza (mm²) de la silueta de una pieza, para ordenar de mayor a menor. */
+function obSolidArea(solid) {
+  const CL = ClipperLib, S = 10;
+  const paths = (solid || []).map(path => path.map(p => ({ X: Math.round(p.x * S), Y: Math.round(p.y * S) })));
+  if (!paths.length) return 0;
+  const c = new CL.Clipper();
+  c.AddPaths(paths, CL.PolyType.ptSubject, true);
+  const out = new CL.Paths();
+  c.Execute(CL.ClipType.ctUnion, out, CL.PolyFillType.pftNonZero, CL.PolyFillType.pftNonZero);
+  let a = 0;
+  out.forEach(p => a += CL.Clipper.Area(p));
+  return Math.abs(a) / (S * S);
+}
+/* v102: paso de giro pedido (__NEST_CFG__.rotStep) → ángulos base de la pasada fina. */
+function obRotBase(step) {
+  const s = OB_ROT_STEPS.indexOf(+step) >= 0 ? +step : 15;
+  const base = [];
+  for (let b = s; b < 90; b += s) base.push(b);
+  return base;
 }
 async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   if (!clipperOK() || !(W > 0 && H > 0)) return null;
@@ -12510,23 +12704,26 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   const R = obResolution(W, H);
   const gw = Math.floor(W / R), gh = Math.floor(H / R);
   const types = [], oversized = [];
-  let lastYield = Date.now();
+  const t0 = Date.now();
+  let lastYield = t0, deadline = Infinity;
   const breathe = async () => {
     if (Date.now() - lastYield > 60) { await new Promise(r => setTimeout(r, 0)); lastYield = Date.now(); }
     if (cancelled()) throw new Error('__NEST_CANCELLED__');
+    if (Date.now() > deadline) throw new Error('__OB_TIMEOUT__');
   };
-  // ── 1. máscaras por tipo de pieza ──
-  const totalQ = srcList.reduce((s, p) => s + Math.max(1, p.quantity || 1), 0);
+  // ── 1. máscaras por tipo de pieza (0/90/180/270; las finas solo si hay pasada fina) ──
   for (let i = 0; i < srcList.length; i++) {
     if (onProgress) onProgress('masks', i, srcList.length);
-    const T = obPieceType(srcList[i], R, gap);
+    const T = obPieceType(srcList[i], R, gap, [0]);
     if (T && !T.masks.some(m => m.w <= gw && m.h <= gh)) {
       oversized.push((srcList[i].label || 'pieza') + ' (' + Math.round(T.w) + '×' + Math.round(T.h) + ' mm)');
       types.push(null);
     } else types.push(T);
     await breathe();
   }
-  // ── 2. instancias por pedido, en orden de primera aparición ──
+  const tMasks = Date.now() - t0;
+  const solidA = types.map(T => T ? obSolidArea(T.solid) : 0);
+  // ── 2. instancias por pedido, en orden de primera aparición; de más a menos material ──
   const orderKeys = [], byOrder = new Map();
   srcList.forEach((p, t) => {
     if (!types[t]) return;
@@ -12535,106 +12732,204 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
     const n = Math.max(1, Math.round(p.quantity || 1));
     for (let c = 0; c < n; c++) byOrder.get(key).push({ t, c });
   });
-  const areaOf = inst => types[inst.t].w * types[inst.t].h;
+  orderKeys.forEach(k => byOrder.get(k).sort((a, b) => solidA[b.t] - solidA[a.t] || a.t - b.t || a.c - b.c));
+  const totalQ = orderKeys.reduce((s, k) => s + byOrder.get(k).length, 0);
   const pieceBias = Math.ceil(OB_ROTATE_BIAS_MM / R), blockBias = Math.ceil(OB_BLOCK_ROTATE_BIAS_MM / R);
-  // ── 3. bloques candidatos de cada pedido (con continuaciones si no cabe en una placa) ──
-  const blocks = [];
+  const pen = a => a ? pieceBias : 0; // cualquier giro (90° o fino) tiene que ganar sitio de verdad
   const quick = orderKeys.length === 1; // un solo pedido: su bloque ES la placa
+  const kGap = Math.max(0, Math.round(OB_ORDER_GAP_MM / R));
+  const kClose = Math.max(0, Math.round(OB_CLOSE_MM / R));
+  const placedSolid = r => r.cands[0].placements.reduce((s, pl) => s + solidA[pl.t], 0);
   let doneQ = 0;
-  for (const key of orderKeys) {
-    let insts = byOrder.get(key).slice().sort((a, b) => areaOf(b) - areaOf(a) || a.t - b.t || a.c - b.c);
-    let guard = 0;
-    while (insts.length && guard++ < 64) {
-      const { cands, left } = obFormBlock(insts, types, gw, gh, quick || insts.length > 150, pieceBias);
-      if (!cands.length) { oversized.push(key + ': ' + insts.length + ' pieza(s) sin colocar'); break; }
-      blocks.push({ key, cands });
-      doneQ += cands[0].placements.length;
-      if (onProgress) onProgress('place', Math.round(doneQ * 0.6), totalQ);
-      insts = left;
+  const progress = () => { if (onProgress) onProgress('place', Math.min(totalQ, Math.round(doneQ)), totalQ); };
+  /* Una pasada: bloques de cada pedido con las orientaciones `idxs` y reparto en placas.
+     Cada pedido se empaqueta con los dos criterios (centro de masas y borde superior): si
+     cabe entero, sus candidatos se suman; si se reparte por placas, gana el trozo que más
+     material mete en la primera. */
+  const pass = async (idxs, factors, share) => {
+    const tp0 = Date.now();
+    const blocks = [], miss = [];
+    for (const key of orderKeys) {
+      let insts = byOrder.get(key);
+      let guard = 0;
+      while (insts.length && guard++ < 64) {
+        let pick = null;
+        for (const fit of OB_FITS) {
+          const r = await obFormBlock(insts, types, gw, gh, quick || insts.length > 150, pen, idxs, fit, factors, breathe);
+          if (!r.cands.length) continue;
+          if (!pick) pick = r;
+          else if (!r.left.length && !pick.left.length) pick = { cands: pick.cands.concat(r.cands).sort((a, b) => a.score - b.score), left: [] };
+          else if (placedSolid(r) > placedSolid(pick)) pick = r;
+        }
+        if (!pick) { miss.push(key + ': ' + insts.length + ' pieza(s) sin colocar'); break; }
+        blocks.push({ key, cands: pick.cands });
+        doneQ += pick.cands[0].placements.length * share;
+        progress();
+        insts = pick.left;
+      }
+    }
+    const tForm = Date.now() - tp0;
+    // ── reparto de los bloques en placas ──
+    /* Cada bloque se prueba con sus candidatos y 4 giros; el estampado se dilata
+       OB_ORDER_GAP_MM (entre pedidos queda más aire que entre letras de un pedido). v102:
+       el bloque puede ocupar su RECTÁNGULO (v100) o su SILUETA cerrada (obClose), y en cada
+       placa vale el primer candidato que cabe o el que deja el borde inferior más arriba.
+       Son baratos, así que se prueban todos con 4 órdenes y gana el que gasta menos placas
+       y, a igualdad, deja más libre (y más arriba) la última: lo que sobra es un retal. */
+    let SIL = false, LOW = false;
+    const masksOf = c => {
+      const k = SIL ? 'ms' : 'mr';
+      if (!c[k]) {
+        const ms = [SIL ? obClose(obBlockSilhouette(c, types), kClose) : obRectMask(c.w, c.h)];
+        for (let q = 1; q < 4; q++) ms.push(obRotCW(ms[q - 1]));
+        c[k] = ms;
+        c[k + 'd'] = [];
+      }
+      c.masks = c[k];
+      c.dil = c[k + 'd'];
+      return c.masks;
+    };
+    const dilOf = (c, q) => c.dil[q] || (c.dil[q] = obDilate(c.masks[q], kGap));
+    const assemble = async list => {
+      const shs = [], lost = [];
+      for (const bl of list) {
+        let got = null, target = null;
+        const tryPlace = sh => {
+          let best = null;
+          for (const c of bl.cands) {
+            const ms = masksOf(c);
+            if (ms[0].area > sh.grid.free) continue; // no cabe ni por área
+            const fit = obBestFit(sh.grid, ms, [0, 2, 1, 3], blockBias, LOW && best ? best.bottom : null);
+            if (!fit) continue;
+            if (!LOW) return { c, fit };
+            const bottom = fit.y + ms[fit.q].h;
+            if (!best || bottom < best.bottom) best = { c, fit, bottom };
+          }
+          return best;
+        };
+        for (const sh of shs) { got = tryPlace(sh); if (got) { target = sh; break; } }
+        if (!target) {
+          target = { grid: obGrid(gw, gh), items: [], usedH: 0, solid: 0 };
+          got = tryPlace(target);
+          if (!got) { lost.push(bl.key + ': bloque mayor que la placa'); continue; }
+          shs.push(target);
+        }
+        masksOf(got.c);
+        const dil = dilOf(got.c, got.fit.q);
+        target.grid.stamp(dil.mask, got.fit.x - dil.k, got.fit.y - dil.k);
+        target.items.push({ bl, c: got.c, fit: got.fit });
+        target.usedH = Math.max(target.usedH, got.fit.y + got.c.masks[got.fit.q].h);
+        target.solid += got.c.placements.reduce((s, pl) => s + solidA[pl.t], 0);
+        await breathe();
+      }
+      const last = shs[shs.length - 1];
+      return { shs, lost, score: [lost.length, shs.length, last ? last.usedH : 0, last ? last.solid : 0] };
+    };
+    const bArea = bl => bl.cands[0].w * bl.cands[0].h;
+    const orders = [
+      blocks.slice().sort((a, b) => bArea(b) - bArea(a)),
+      blocks.slice().sort((a, b) => Math.max(b.cands[0].w, b.cands[0].h) - Math.max(a.cands[0].w, a.cands[0].h)),
+      blocks.slice().sort((a, b) => b.cands[0].h - a.cands[0].h || bArea(b) - bArea(a)),
+      blocks.slice().sort((a, b) => b.cands[0].w - a.cands[0].w || bArea(b) - bArea(a))
+    ];
+    let best = null;
+    for (const [sil, low] of OB_ASSEMBLY) {
+      SIL = sil; LOW = low;
+      for (const list of orders) {
+        const asm = await assemble(list);
+        asm.mode = (sil ? 'silueta' : 'rectángulo') + (low ? '+abajo' : '');
+        if (!best || obScoreLess(asm.score, best.score)) best = asm;
+      }
+    }
+    best.miss = miss;
+    best.t = [tForm, Date.now() - tp0 - tForm];
+    return best;
+  };
+  // ── 3. pasada A: 0/90/180/270 (resultado seguro y medida de lo rápida que es la máquina) ──
+  const A = await pass([0, 2, 1, 3], OB_WIDTHS, 0.5);
+  A.step = 90;
+  let winner = A;
+  // ── 4. pasada B: giros finos, si caben en el tiempo (se calibra con lo que tardó A) ──
+  const want = OB_ROT_STEPS.indexOf(+__NEST_CFG__.rotStep) >= 0 ? +__NEST_CFG__.rotStep : 15;
+  const tA = Date.now() - t0;
+  /* Coste estimado de la pasada fina con lo MEDIDO en la A: máscaras × ángulos base nuevos,
+     empaquetado × orientaciones (y franjas) de más, y un reparto parecido al de A. */
+  const estB = s => {
+    const nb = obRotBase(s).length;
+    return tMasks * nb + A.t[0] * (1 + nb) * OB_WIDTHS_FINE.length / OB_WIDTHS.length + A.t[1] * 1.15;
+  };
+  // muchas piezas (letras pequeñas): 30° da lo mismo que 15° en la mitad de tiempo
+  const minStep = Math.max(want, totalQ > OB_FINE_MAX_Q ? 30 : 0);
+  const step = want < 90 ? [minStep, 30, 45].filter((s, i, a) => s >= minStep && a.indexOf(s) === i).find(s => tA + estB(s) <= OB_BUDGET_MS) : null;
+  const diag = { tA, tMasks, tAparts: A.t, est: want < 90 ? Math.round(estB(want)) : 0, step: step || null, a: [A.miss.length].concat(A.score) };
+  if (step) {
+    deadline = t0 + OB_HARD_MS;
+    try {
+      const base = obRotBase(step);
+      for (let i = 0; i < types.length; i++) { if (types[i]) obAddAngles(types[i], base); await breathe(); }
+      const idxs = [0, 2, 1, 3];
+      for (let a = 4; a < 4 * (1 + base.length); a++) idxs.push(a);
+      const B = await pass(idxs, OB_WIDTHS_FINE, 0.5);
+      B.step = step;
+      diag.b = [B.miss.length].concat(B.score);
+      diag.tB = Date.now() - t0 - tA;
+      diag.tBparts = B.t;
+      if (obScoreLess([B.miss.length].concat(B.score), [A.miss.length].concat(A.score))) winner = B;
+    } catch (e) {
+      if (e && e.message === '__NEST_CANCELLED__') throw e;
+      // tiempo agotado (o fallo) en la pasada fina: vale la pasada A
+      diag.err = e && e.message;
+      console.warn('[Rotula] pasada de giros finos descartada:', e && e.message);
+    } finally { deadline = Infinity; }
+  }
+  // ── 5. volcado a placas (y red final con la geometría real) ──
+  const dump = async asm => {
+    const sheets = [];
+    for (const sh of asm.shs) {
+      const target = { pieces: [], blocks: [], check: [] };
+      for (const { bl, c, fit } of sh.items) {
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const pl0 of c.placements) {
+          const pl = obRotatePlacement(pl0, types, c.w, c.h, fit.q);
+          const T = types[pl.t], src = T.piece, rot = T.ang[pl.q];
+          const pw = T.dim[pl.q].w, ph = T.dim[pl.q].h;
+          const x = (fit.x + pl.gx) * R + T.off[pl.q].x, y = (fit.y + pl.gy) * R + T.off[pl.q].y;
+          const solid = obPlacedSolid(T, pl.q, x, y);
+          // caja del pedido con el DIBUJO real (con giro fino la caja del hueco asoma de la placa)
+          for (const path of solid) for (const p of path) { if (p.X < x0) x0 = p.X; if (p.X > x1) x1 = p.X; if (p.Y < y0) y0 = p.Y; if (p.Y > y1) y1 = p.Y; }
+          target.pieces.push({
+            ...src,
+            x, y,
+            placedW: pw, placedH: ph, drawW: pw, drawH: ph,
+            gridW: Math.max(1, Math.ceil(pw / GRID_CELL)), gridH: Math.max(1, Math.ceil(ph / GRID_CELL)),
+            rotated: rot !== 0, rotation: rot,
+            instanceId: (src.id != null ? src.id : 'p' + pl.t) + '-q' + pl.inst.c
+          });
+          target.check.push({ label: src.label, solid });
+        }
+        target.blocks.push({ key: bl.key, x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+      }
+      // red final con la geometría real: un solape aquí sería un fallo del motor → nesting normal
+      const clash = obFindOverlap(target.check);
+      if (clash) throw new Error('solape entre ' + clash.join(' y '));
+      delete target.check;
+      sheets.push(target);
       await breathe();
     }
-  }
-  // ── 4. bloques en placas: cada uno con sus candidatos y 4 giros ──
-  const kGap = Math.max(0, Math.round(OB_ORDER_GAP_MM / R));
-  const masksOf = c => {
-    if (!c.masks) {
-      c.masks = [obRectMask(c.w, c.h)];
-      for (let k = 1; k < 4; k++) c.masks.push(obRotCW(c.masks[k - 1]));
-    }
-    return c.masks;
+    return sheets;
   };
-  /* Reparto de los bloques en placas en un orden dado. Barato (rectángulos), así que se
-     prueban varios órdenes y se queda el que gasta menos placas y, a igualdad, deja más
-     libre la última (lo que sobra es un retal aprovechable). */
-  const assemble = list => {
-    const shs = [], miss = [];
-    for (const bl of list) {
-      let got = null, target = null;
-      const tryPlace = sh => {
-        for (const c of bl.cands) {
-          const fit = obBestFit(sh.grid, masksOf(c), [0, 2, 1, 3], blockBias);
-          if (fit) return { c, fit };
-        }
-        return null;
-      };
-      for (const sh of shs) { got = tryPlace(sh); if (got) { target = sh; break; } }
-      if (!target) {
-        target = { grid: obGrid(gw, gh), items: [], usedH: 0 };
-        got = tryPlace(target);
-        if (!got) { miss.push(bl.key + ': bloque mayor que la placa'); continue; }
-        shs.push(target);
-      }
-      const dil = obDilate(got.c.masks[got.fit.q], kGap);
-      target.grid.stamp(dil.mask, got.fit.x - dil.k, got.fit.y - dil.k);
-      target.items.push({ bl, c: got.c, fit: got.fit });
-      target.usedH = Math.max(target.usedH, got.fit.y + got.c.masks[got.fit.q].h);
-    }
-    return { shs, miss, score: shs.length * 1e7 + (shs.length ? shs[shs.length - 1].usedH : 0) };
-  };
-  const bArea = bl => bl.cands[0].w * bl.cands[0].h;
-  const orders = [
-    blocks.slice().sort((a, b) => bArea(b) - bArea(a)),
-    blocks.slice().sort((a, b) => Math.max(b.cands[0].w, b.cands[0].h) - Math.max(a.cands[0].w, a.cands[0].h)),
-    blocks.slice().sort((a, b) => b.cands[0].h - a.cands[0].h || bArea(b) - bArea(a)),
-    blocks.slice().sort((a, b) => b.cands[0].w - a.cands[0].w || bArea(b) - bArea(a))
-  ];
-  let bestAsm = null;
-  for (const list of orders) {
-    const asm = assemble(list);
-    if (!bestAsm || asm.miss.length < bestAsm.miss.length || asm.miss.length === bestAsm.miss.length && asm.score < bestAsm.score) bestAsm = asm;
-    await breathe();
+  let sheets;
+  try {
+    sheets = await dump(winner);
+  } catch (e) {
+    if (winner === A || e && e.message === '__NEST_CANCELLED__') throw e;
+    // la pasada fina no supera la red final: vale la A (0/90/180/270, la de siempre)
+    console.warn('[Rotula] giros finos descartados en la red final:', e && e.message);
+    diag.err = e && e.message;
+    winner = A;
+    sheets = await dump(A);
   }
-  oversized.push(...bestAsm.miss);
-  const sheets = [];
-  for (const sh of bestAsm.shs) {
-    const target = { pieces: [], blocks: [], check: [] };
-    for (const { bl, c, fit } of sh.items) {
-      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for (const pl0 of c.placements) {
-        const pl = obRotatePlacement(pl0, types, c.w, c.h, fit.q);
-        const T = types[pl.t], src = T.piece, rot = pl.q * 90;
-        const pw = pl.q % 2 ? T.h : T.w, ph = pl.q % 2 ? T.w : T.h;
-        const x = (fit.x + pl.gx) * R + T.off[pl.q].x, y = (fit.y + pl.gy) * R + T.off[pl.q].y;
-        x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + pw); y1 = Math.max(y1, y + ph);
-        target.pieces.push({
-          ...src,
-          x, y,
-          placedW: pw, placedH: ph, drawW: pw, drawH: ph,
-          gridW: Math.max(1, Math.ceil(pw / GRID_CELL)), gridH: Math.max(1, Math.ceil(ph / GRID_CELL)),
-          rotated: rot !== 0, rotation: rot,
-          instanceId: (src.id != null ? src.id : 'p' + pl.t) + '-q' + pl.inst.c
-        });
-        target.check.push({ label: src.label, solid: obPlacedSolid(T, pl.q, x, y) });
-      }
-      target.blocks.push({ key: bl.key, x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
-    }
-    // red final con la geometría real: un solape aquí sería un fallo del motor → nesting normal
-    const clash = obFindOverlap(target.check);
-    if (clash) throw new Error('solape entre ' + clash.join(' y '));
-    delete target.check;
-    sheets.push(target);
-    await breathe();
-  }
+  oversized.push(...winner.miss, ...winner.lost);
   const out = sheets.map(sh => {
     const s = { grid: null, pieces: sh.pieces };
     s._orderBlocks = sh.blocks;
@@ -12644,8 +12939,17 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   out._engine = true;
   out._grouped = true;
   out._res = R;
+  out._rotStep = winner.step;
+  out._mode = winner.mode;
+  out._ms = Date.now() - t0;
+  out._diag = diag; // pasadas: tiempo de A, paso fino probado y puntuación de cada una
   if (oversized.length) out._oversized = oversized;
   return out;
+}
+/* [sin colocar, placas, alto usado de la última, material en la última]: menor es mejor. */
+function obScoreLess(a, b) {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];
+  return false;
 }
 
 /* ── Retales (recortes en stock) ───────────────────────────────────────────────
@@ -13107,6 +13411,7 @@ function pieceToPolylinesMM(piece, maxN) {
     cy = vb[1] + vb[3] / 2;
   let viewBoxStr = piece.viewBox;
   let rotateXform = null;
+  let fineScale = 0;
   if (piece.rotated && piece.rotation) {
     const r = piece.rotation;
     let nvbW = vb[2],
@@ -13114,6 +13419,16 @@ function pieceToPolylinesMM(piece, maxN) {
     if (r === 90 || r === 270) {
       nvbW = vb[3];
       nvbH = vb[2];
+    } else if (r % 90) {
+      /* v102: giro fino (motor por bloques). El hueco es la caja del rectángulo w×h girado y
+         el dibujo gira sobre su centro. La escala es la de la pieza SIN girar (encaje "meet"
+         en w×h): sacada de la caja girada cambiaría si w×h no guarda la proporción del dibujo. */
+      const t = r * Math.PI / 180,
+        c = Math.abs(Math.cos(t)),
+        s = Math.abs(Math.sin(t));
+      nvbW = vb[2] * c + vb[3] * s;
+      nvbH = vb[2] * s + vb[3] * c;
+      if (piece.w > 0 && piece.h > 0) fineScale = Math.min(piece.w / vb[2], piece.h / vb[3]);
     }
     viewBoxStr = cx - nvbW / 2 + " " + (cy - nvbH / 2) + " " + nvbW + " " + nvbH;
     rotateXform = "rotate(" + r + " " + cx + " " + cy + ")";
@@ -13123,7 +13438,7 @@ function pieceToPolylinesMM(piece, maxN) {
     vbY = vbParts[1],
     vbW = vbParts[2],
     vbH = vbParts[3];
-  const fitScale = Math.min(drawW / vbW, drawH / vbH);
+  const fitScale = fineScale || Math.min(drawW / vbW, drawH / vbH);
   const padX = (drawW - vbW * fitScale) / 2;
   const padY = (drawH - vbH * fitScale) / 2;
   const ns = "http://www.w3.org/2000/svg";
@@ -15235,17 +15550,29 @@ function VectorEditor({
           if (p.__edid == null) return;
           const o = objects.find(x => x.id === p.__edid);
           if (!o) return;
-          const newRot = o.rot + (p.rotated ? p.rotation || 0 : 0);
-          const wb = boundsOf(worldSubpaths({
-            ...o,
-            rot: newRot
-          }));
-          const wcx = (wb.minX + wb.maxX) / 2,
-            wcy = (wb.minY + wb.maxY) / 2;
+          const th = p.rotated ? p.rotation || 0 : 0;
+          const newRot = o.rot + th;
           const tx = offX + p.x + p.placedW / 2, // v89: fila horizontal
             ty = p.y + p.placedH / 2;
-          let ncx = o.cx + (tx - wcx),
-            ncy = o.cy + (ty - wcy);
+          let ncx, ncy;
+          if (th % 90 && p._svgW != null && p._edX != null) {
+            /* v102: giro fino. El motor gira la pieza sobre el centro C de su caja y lleva C al
+               centro del hueco; la caja del dibujo YA girado no está centrada en C (sí con 90°). */
+            const a = th * Math.PI / 180,
+              c = Math.cos(a),
+              s = Math.sin(a);
+            const dx = p._edX + p._svgW / 2 - o.cx,
+              dy = p._edY + p._svgH / 2 - o.cy;
+            ncx = tx - (dx * c - dy * s);
+            ncy = ty - (dx * s + dy * c);
+          } else {
+            const wb = boundsOf(worldSubpaths({
+              ...o,
+              rot: newRot
+            }));
+            ncx = o.cx + (tx - (wb.minX + wb.maxX) / 2);
+            ncy = o.cy + (ty - (wb.minY + wb.maxY) / 2);
+          }
           // Invariante CNC: tras centrar, se acotan los bounds reales al marco de la hoja para que
           // ninguna pieza se salga (ver nota en placedToEditorObjects).
           try {
@@ -17747,6 +18074,12 @@ function App() {
   const [gapMM, setGapMM] = useState(__NEST_CFG__.gap);
   const [nfpEngine, setNfpEngine] = useState(__NEST_CFG__.nfp);
   const [groupOrders, setGroupOrders] = useState(__NEST_CFG__.groupOrders !== false); // v82
+  const [rotStep, setRotStep] = useState(() => {
+    // v102: paso de giro recordado en este navegador
+    const v = +LS.get("np-rotstep", __NEST_CFG__.rotStep);
+    __NEST_CFG__.rotStep = OB_ROT_STEPS.indexOf(v) >= 0 ? v : 15;
+    return __NEST_CFG__.rotStep;
+  });
   const runNesting = async (list, keepEditor) => {
     const srcList = Array.isArray(list) ? list : pieces;
     if (!srcList.length || nesting) return null;
@@ -18763,7 +19096,7 @@ function App() {
     style: {
       color: "#E6007E"
     }
-  }, "v101"))))), tab === "nesting" && React.createElement("div", {
+  }, "v102"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",
@@ -19146,7 +19479,39 @@ function App() {
       __NEST_CFG__.groupOrders = e.target.checked; // v100: bloques por pedido
       setNestResult(null);
     }
-  }), "Agrupar por pedido")), React.createElement("button", {
+  }), "Agrupar por pedido"), React.createElement("label", {
+    title: "Paso de giro de las piezas al agrupar por pedido, como en VCarve. 15\xB0: cada letra se inclina donde encaja mejor (menos placas). 90\xB0: solo derechas o tumbadas (materiales con veta o impresos).",
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 5,
+      fontSize: 12,
+      color: groupOrders ? "#555" : "#bbb",
+      fontWeight: 600
+    }
+  }, "Giro", React.createElement("select", {
+    "data-testid": "rot-step",
+    value: rotStep,
+    disabled: !groupOrders,
+    onChange: e => {
+      const v = +e.target.value;
+      setRotStep(v);
+      __NEST_CFG__.rotStep = v; // v102
+      LS.set("np-rotstep", v);
+      setNestResult(null);
+    },
+    style: {
+      padding: "4px 6px",
+      border: "1px solid #e5e5e5",
+      borderRadius: 6,
+      fontSize: 12,
+      fontFamily: "inherit",
+      background: "#fff"
+    }
+  }, OB_ROT_STEPS.map(v => React.createElement("option", {
+    key: v,
+    value: v
+  }, v + "\xB0"))))), React.createElement("button", {
     onClick: runNesting,
     disabled: nesting,
     className: "btn-glow",
