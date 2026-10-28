@@ -112,7 +112,9 @@ async function main() {
           const G = sh.pieces.map(p => pieceToPolylinesMM(p).polylines);
           rep.pieces += G.length;
           G.forEach(pl => pl.forEach(q => q.forEach(p => { if (p.x < -0.01 || p.y < -0.01 || p.x > W + 0.01 || p.y > H + 0.01) rep.outside++; })));
-          const U = G.map(pl => { const c = new CL.Clipper(); const ps = pl.filter(q => q.length >= 4 && isClosedPts(q)).map(q => { const r = q.map(p => ({ X: Math.round(p.x * S), Y: Math.round(p.y * S) })); if (!CL.Clipper.Orientation(r)) r.reverse(); return r; }); c.AddPaths(ps, CL.PolyType.ptSubject, true); const o = new CL.Paths(); c.Execute(CL.ClipType.ctUnion, o, CL.PolyFillType.pftNonZero, CL.PolyFillType.pftNonZero); return o; });
+          // v103: material REAL de cada pieza, con sus interiores pasantes vacíos (otra pieza puede ir
+          // dentro de una "O"): la misma regla que el motor (obInflatedOutline con holes), inflado 0
+          const U = G.map(pl => (__NEST_CFG__.fillHoles !== false ? obInflatedOutline(pl, 1, 1, 0.001, 0, true).solid : obInflatedOutline(pl, 1, 1, 0.001, 0, false).solid).map(path => path.map(p => ({ X: Math.round(p.x * S), Y: Math.round(p.y * S) }))));
           const off = U.map(u => { const co = new CL.ClipperOffset(2, 0.02 * S); co.AddPaths(u, CL.JoinType.jtRound, CL.EndType.etClosedPolygon); const o = new CL.Paths(); co.Execute(o, (gap / 2 - 0.1) * S); return o; });
           const bb = U.map(u => { let a = 1e18, b = 1e18, c = -1e18, d = -1e18; u.forEach(pp => pp.forEach(q => { a = Math.min(a, q.X); b = Math.min(b, q.Y); c = Math.max(c, q.X); d = Math.max(d, q.Y); })); return { a, b, c, d }; });
           for (let i = 0; i < U.length; i++) for (let j = i + 1; j < U.length; j++) {
@@ -329,6 +331,57 @@ async function main() {
     assert(r.n === 1, 'deberían compartir placa: ' + JSON.stringify(r));
     assert(/silueta/.test(r.mode), 'modo ' + r.mode);
     assert(!r.a.overlaps.length && !r.a.outside && !r.a.orderGaps.length, JSON.stringify(r.a).slice(0, 300));
+  });
+  // ── v103: interiores pasantes y zona de relleno junto a piezas muy grandes ──
+  const circ = (cx, cy, r, n) => { let d = ''; for (let i = 0; i < n; i++) { const a = 2 * Math.PI * i / n; d += (i ? 'L' : 'M') + (cx + r * Math.cos(a)).toFixed(2) + ',' + (cy + r * Math.sin(a)).toFixed(2); } return d + 'Z'; };
+  // aro de Ø400 con interior de Ø300 (un único path con dos subtrazos, como una "O" de Illustrator)
+  const svgAro = (inner, extra) => '<svg xmlns="http://www.w3.org/2000/svg" width="400mm" height="400mm" viewBox="0 0 400 400">' + (inner === 'cajeado'
+    ? '<g id="MET_CORTE"><path d="' + circ(200, 200, 200, 96) + '"/></g><g id="MET_CAJEADO"><path d="' + circ(200, 200, 150, 96) + '"/></g>'
+    : '<path fill-rule="evenodd" d="' + circ(200, 200, 200, 96) + circ(200, 200, inner || 150, 96) + '"/>') + (extra || '') + '</svg>';
+  const nestAro = async (aro, cfg) => page.evaluate(async ({ aro, sq, cfg }) => {
+    const prev = { ...__NEST_CFG__ }; Object.assign(__NEST_CFG__, cfg || {});
+    try {
+      const pcs = [...orderToPieces({ ref: 'AROSOLOO-1', fileName: 'a.svg', qty: 1 }, parseSVG(aro).pieces, 'PVC'), ...orderToPieces({ ref: 'AROSOLOO-1', fileName: 'a.svg', qty: 4 }, parseSVG(sq).pieces, 'PVC')];
+      const sh = await nestWithRetales(pcs, 430, 430, 5, null, []);
+      return { n: sh.length, a: __t.audit(sh, 430, 430, 5), capas: [...new Set(parseSVG(aro).pieces.flatMap(p => (p.svgContent.match(/data-capa="([^"]+)"/g) || [])))] };
+    } finally { Object.keys(__NEST_CFG__).forEach(k => delete __NEST_CFG__[k]); Object.assign(__NEST_CFG__, prev); }
+  }, { aro, sq: svgPoly('0,0 70,0 70,70 0,70', 70, 70), cfg });
+  await test('interior pasante: 4 piezas de su pedido caben DENTRO de una "O" (placa 430×430)', async () => {
+    const r = await nestAro(svgAro(150));
+    assert(r.n === 1, 'deberían ir dentro del aro: ' + r.n + ' placas');
+    assert(r.a.pieces === 5 && !r.a.overlaps.length && !r.a.outside, JSON.stringify(r.a).slice(0, 300));
+    const off = await nestAro(svgAro(150), { fillHoles: false });
+    assert(off.n > 1, 'con "Rellenar huecos" apagado el interior no se usa (v102): ' + off.n);
+  });
+  await test('no es interior: cajeado (capa del SVG), trazo doble ni hueco pequeño', async () => {
+    const caj = await nestAro(svgAro('cajeado'));
+    assert(caj.capas.some(c => /cajeado/.test(c)), 'la capa MET CAJEADO del SVG debería entrar como cajeado: ' + caj.capas);
+    assert(caj.n > 1, 'nada puede ir dentro de un cajeado: ' + caj.n + ' placas');
+    const doble = await nestAro(svgAro(198.5)); // banda de 1,5 mm: un trazo expandido, no una "O"
+    assert(doble.n > 1, 'un trazo doble no es un interior: ' + doble.n + ' placas');
+    const peq = await page.evaluate(svg => obInflatedOutline(window.pieceOutlineMM.shapes(parseSVG(svg).pieces[0], 0.05), 400, 400, 1, 0, true).holes, svgAro(20));
+    assert(peq === 0, 'un hueco de Ø40 no admite piezas: ' + peq);
+  });
+  await test('pieza muy grande: un pedido pequeño entra ENTERO en su interior y queda junto', async () => {
+    // aro enorme (Ø1900, banda 60) de un pedido + 30 cuadros de 150 de otro, placa 2000×2000
+    const aro = '<svg xmlns="http://www.w3.org/2000/svg" width="1900mm" height="1900mm" viewBox="0 0 1900 1900"><path fill-rule="evenodd" d="' + circ(950, 950, 950, 180) + circ(950, 950, 890, 180) + '"/></svg>';
+    const r = await page.evaluate(async ({ aro, sq }) => {
+      const run = async on => {
+        const prev = __NEST_CFG__.fillHoles; __NEST_CFG__.fillHoles = on;
+        try {
+          const pcs = [...orderToPieces({ ref: 'AROGRANDE-1', fileName: 'g.svg', qty: 1 }, parseSVG(aro).pieces, 'PVC'), ...orderToPieces({ ref: 'CUADROSXX-1', fileName: 'c.svg', qty: 30 }, parseSVG(sq).pieces, 'PVC')];
+          const sh = await nestWithRetales(pcs, 2000, 2000, 5, null, []);
+          const sq0 = sh[0].pieces.filter(p => orderKeyOf(p) === 'CUADROSXX').map(p => ({ x: p.x + p.placedW / 2, y: p.y + p.placedH / 2 }));
+          const cx = sq0.reduce((s, p) => s + p.x, 0) / (sq0.length || 1), cy = sq0.reduce((s, p) => s + p.y, 0) / (sq0.length || 1);
+          return { n: sh.length, mixed: sh._mixed || 0, mode: sh._mode, enPlaca1: sq0.length, radio: Math.max(0, ...sq0.map(p => Math.hypot(p.x - cx, p.y - cy))), a: __t.audit(sh, 2000, 2000, 5) };
+        } finally { __NEST_CFG__.fillHoles = prev; }
+      };
+      return { on: await run(true), off: await run(false) };
+    }, { aro, sq: svgPoly('0,0 150,0 150,150 0,150', 150, 150) });
+    assert(r.off.n === 2, 'sin relleno (v102) el aro se queda la placa entera: ' + r.off.n);
+    assert(r.on.n === 1 && r.on.enPlaca1 === 30 && r.on.mixed === 30, 'con relleno los 30 cuadros van dentro del aro: ' + JSON.stringify({ n: r.on.n, en: r.on.enPlaca1, mixed: r.on.mixed, mode: r.on.mode }));
+    assert(r.on.radio < 700, 'el pedido metido entero debe quedar junto: radio ' + Math.round(r.on.radio) + ' mm');
+    assert(!r.on.a.overlaps.length && !r.on.a.outside, JSON.stringify(r.on.a).slice(0, 300));
   });
   await test('rótulos fuera de la placa y título encima', async () => {
     const r = await page.evaluate(async () => {
@@ -645,7 +698,7 @@ async function main() {
   });
   await UI.close();
 
-  await test('selector de giro (v102): 15° por defecto, se recuerda y se apaga sin agrupar por pedido', async () => {
+  await test('selector de giro (v102) y Rellenar huecos (v103): por defecto, se recuerdan y se apagan sin agrupar', async () => {
     const Q = await newPage({ viewport: { width: 1600, height: 1100 } }); // contexto propio: no toca el localStorage del resto
     try {
       const sel = () => Q.pg.locator('[data-testid=rot-step]');
@@ -663,8 +716,19 @@ async function main() {
       const grp = Q.pg.locator('label', { hasText: 'Agrupar por pedido' }).locator('input');
       await grp.uncheck();
       assert(await sel().isDisabled(), 'sin agrupar por pedido el giro fino no aplica');
+      assert(await Q.pg.locator('[data-testid=fill-holes]').isDisabled(), 'ni el relleno de huecos');
       await grp.check();
       assert(!(await sel().isDisabled()), 'vuelve a activarse');
+      // v103: "Rellenar huecos" activado por defecto; apagado llega al motor y se recuerda
+      const fh = Q.pg.locator('[data-testid=fill-holes]');
+      assert(await fh.isChecked(), 'Rellenar huecos debería venir activado');
+      await fh.uncheck();
+      assert((await Q.pg.evaluate(() => __NEST_CFG__.fillHoles)) === false, 'no llegó al motor');
+      await Q.pg.reload({ waitUntil: 'domcontentloaded' });
+      await Q.pg.waitForFunction(() => typeof buildOrderGroups === 'function' && document.querySelector('#root').children.length > 0);
+      await Q.pg.evaluate(() => { const f = document.getElementById('rn-panel-frame'); if (f) f.style.display = 'none'; });
+      await conPieza();
+      assert(!(await Q.pg.locator('[data-testid=fill-holes]').isChecked()) && (await Q.pg.evaluate(() => __NEST_CFG__.fillHoles)) === false, 'no se recordó');
     } finally { await Q.close(); }
   });
   await test('móvil 390×844: pestaña táctil y visor completo por encima de la barra LOTES', async () => {

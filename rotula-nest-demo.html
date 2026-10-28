@@ -1,7 +1,23 @@
 <!-- ╔══════════════════════════════════════════════════════════════╗
-     ║  ROTULA NEST v102 — Nesting · Editor · Capas                 ║
+     ║  ROTULA NEST v103 — Nesting · Editor · Capas                 ║
      ║  DEMO-3: Panel Fresa Nave A - Wolfcut (aspecto Rotula        ║
      ║  Analytics) embebido como iframe + 6 pedidos SVG reales.     ║
+     ║  v103: RELLENO JUNTO A PIEZAS MUY GRANDES E INTERIORES. Una  ║
+     ║  pieza muy grande y hueca (flecha curva, aro, marco: caja >= ║
+     ║  12% de la placa y material < 60% de su caja) abre una zona  ║
+     ║  de relleno: ahi entran, sueltas y mezcladas, piezas de      ║
+     ║  otros pedidos, primero pedidos enteros (como bloque         ║
+     ║  compacto o juntos) y luego parte de un pedido grande (>= 40 ║
+     ║  piezas, el resto se re-empaqueta). Lote real PVC 3: placas  ║
+     ║  48% y 31% -> 54% y 25% con la ultima medio libre.           ║
+     ║  Interiores pasantes (O, D, marcos) para piezas de su        ║
+     ║  pedido: anillo de corte de la misma capa, banda >= 4 mm y   ║
+     ║  >= 50 mm; un cajeado o un trazo doble nunca. Si la ultima   ║
+     ║  placa casi vacia cabe en los huecos de las demas, se vacia. ║
+     ║  SVG: la capa MET CAJEADO/AGUJEROS manda sobre el color      ║
+     ║  (antes el cajeado salia en la capa de corte del DXF).       ║
+     ║  Interruptor Rellenar huecos (apagado = v102). Colores de    ║
+     ║  pedido mas distintos.                                       ║
      ║  v102: NESTING QUE APROVECHA EL MATERIAL SIN DEJAR DE        ║
      ║  AGRUPAR POR PEDIDO. Un lote real de Opal 8 (8 pedidos, 68   ║
      ║  letras) que VCarve saca en 2 placas aqui gastaba 3; ahora   ║
@@ -8800,13 +8816,18 @@ return ret;
     const re=/<(\/?)(g|path|polygon|polyline|rect|circle|ellipse|line)\b([^>]*?)(\/?)>/gi; const stack=[[1,0,0,1,0,0]]; let t;
     const attr=(a,n)=>{const m=a.match(new RegExp('\\s'+n+'="([^"]*)"'));return m?m[1]:null;};
     const nattr=(a,n)=>parseFloat(attr(a,n))||0;
+    // v103: capa (data-capa) y capa original (data-layer) de cada contorno, heredadas del <g>:
+    // el motor distingue el interior pasante de una "O" de un cajeado o de un trazo doble
+    const meta=[{capa:null,layer:null}];
     while((t=re.exec(piece.svgRaw))){
       const closing=t[1]==='/', tag=t[2].toLowerCase(), a=t[3]||'', selfClose=t[4]==='/';
-      const top=stack[stack.length-1];
+      const top=stack[stack.length-1], mt=meta[meta.length-1];
       const tr=attr(a,'transform');
-      if(tag==='g'){ if(closing){ if(stack.length>1) stack.pop(); } else if(!selfClose) stack.push(tr?mulM(top,parseTransform(tr)):top); continue; }
+      const own={capa:attr(a,'data-capa')||mt.capa, layer:attr(a,'data-layer')||mt.layer};
+      if(tag==='g'){ if(closing){ if(stack.length>1){ stack.pop(); meta.pop(); } } else if(!selfClose){ stack.push(tr?mulM(top,parseTransform(tr)):top); meta.push(own); } continue; }
       if(closing) continue;
       const M=toMMm(tr?mulM(top,parseTransform(tr)):top);
+      const n0=out.length;
       if(tag==='path'){ const d=attr(a,'d'); if(d) pathPolys(d,M); }
       else if(tag==='polygon'||tag==='polyline'){
         const nums=(attr(a,'points')||'').trim().split(/[\s,]+/).map(parseFloat).filter(v=>!isNaN(v));
@@ -8818,6 +8839,7 @@ return ret;
       else if(tag==='circle'){ const r=nattr(a,'r'); if(r>0) out.push(ellipsePts(M,nattr(a,'cx'),nattr(a,'cy'),r,r)); }
       else if(tag==='ellipse'){ const rx=nattr(a,'rx'),ry=nattr(a,'ry'); if(rx>0&&ry>0) out.push(ellipsePts(M,nattr(a,'cx'),nattr(a,'cy'),rx,ry)); }
       else if(tag==='line'){ out.push([applyM(M,nattr(a,'x1'),nattr(a,'y1')),applyM(M,nattr(a,'x2'),nattr(a,'y2'))]); }
+      for(let k=n0;k<out.length;k++){ out[k].capa=own.capa||'corte'; out[k].layer=own.layer||null; }
     }
     return out;
   }
@@ -9000,7 +9022,10 @@ const __NEST_CFG__ = {
   /* v102: paso de giro de las piezas al agrupar por pedido (el "paso de rotación" de VCarve):
      15 = una letra se inclina donde encaja mejor; 90 = solo derechas o tumbadas (veta,
      impresos). Si el lote es grande el motor lo engorda (30°, 45°) o se queda en 90°. */
-  rotStep: 15
+  rotStep: 15,
+  /* v103: interiores pasantes (el hueco de una "O" para piezas de su pedido) y zona de relleno
+     junto a piezas MUY grandes (ahí se mezclan piezas sueltas de otros pedidos). false = v102. */
+  fillHoles: true
 };
 if (typeof window !== 'undefined') window.__NEST_CFG__ = __NEST_CFG__;
 /* demo-12: sistema de RETALES oculto "por ahora". Un solo interruptor lo apaga por completo:
@@ -9056,7 +9081,8 @@ function aciRGB(i) {
   return t.map(q => Math.round((q + m) * 255));
 }
 const aciHex = i => "#" + aciRGB(i).map(v => v.toString(16).padStart(2, "0")).join("");
-const ORDER_ACI = [92, 212, 112, 42, 152, 7, 192, 132, 32, 232, 62, 142, 172, 34, 202, 52, 124, 14, 74, 244];
+// v103: los primeros, bien distintos entre sí (con relleno, pedidos vecinos se mezclan)
+const ORDER_ACI = [92, 212, 152, 42, 132, 7, 192, 112, 32, 232, 62, 142, 172, 34, 202, 52, 124, 14, 74, 244];
 const SRC_PALETTE = ORDER_ACI.map(aciHex);
 const srcColorFor = fileName => {
   if (!fileName) return null;
@@ -11165,7 +11191,11 @@ function groupElementsByContainment(elements) {
 /* Marca el elemento con su capa detectada y devuelve su marcado en dos versiones:
    `raw` conserva los colores (vista previa) y `clean` va sin estilos (geometría de corte). */
 function serializeCuttableElement(item) {
-  const capa = capaFromColor(colorOfSvgEl(item.el)) || "corte";
+  /* v103: si la capa del archivo dice qué mecanizado es ("MET CAJEADO", "AGUJEROS"…), manda
+     sobre el color, como en PDF/AI. Antes un cajeado con trazo negro entraba como CORTE: salía
+     en la capa de corte del DXF y el motor lo habría tomado por el interior pasante de la letra. */
+  const byLayer = item.layer ? classifyLayerName(item.layer) : null;
+  const capa = byLayer && byLayer.isCut && byLayer.capa !== "corte" ? byLayer.capa : capaFromColor(colorOfSvgEl(item.el)) || "corte";
   item.el.setAttribute("data-capa", capa);
   if (item.layer) item.el.setAttribute("data-layer", item.layer); // demo-11: capa real → subMeta.layer + DXF verbatim
   const markup = new XMLSerializer().serializeToString(item.el);
@@ -12204,7 +12234,18 @@ async function nestPiecesNFP(pieces, W, H, gap, onProgress) {
        meterse entre las letras.
      · Dos pasadas: A con 0/90/180/270 (resultado seguro, mide la máquina) y B con giros
        finos si caben en OB_BUDGET_MS según lo que tardó A (15° → 30° → 45°), con tope duro
-       OB_HARD_MS. Gana la que gasta menos placas y deja más libre la última. */
+       OB_HARD_MS. Gana la que gasta menos placas y deja más libre la última.
+
+   v103 · PIEZAS MUY GRANDES E INTERIORES (un lote de PVC con dos flechas enormes ocupaba una
+   placa casi vacía mientras el resto iba a otra):
+     · Las máscaras dejan libre el interior PASANTE de una letra (obHoleRings): ahí pueden ir
+       piezas de su propio pedido. Un cajeado, un trazo doble o un hueco < 50 mm no lo son.
+     · Una pieza MUY GRANDE y hueca abre una ZONA DE RELLENO (fillZone): piezas de otros
+       pedidos entran sueltas en sus huecos e interiores, sin pasillo —pedidos pequeños
+       enteros (como bloque o juntos) y parte de un pedido grande, que se re-empaqueta—.
+       Fuera de la zona todo sigue agrupado como en v102.
+     · Si la última placa casi vacía cabe en los huecos de las demás, se vacía (evictLast).
+     · Interruptor "Rellenar huecos" (__NEST_CFG__.fillHoles): apagado = v102. */
 const OB_ORDER_GAP_MM = 12;
 const OB_ROTATE_BIAS_MM = 15; // lo que tiene que subir una pieza girada para preferirla a derechas
 const OB_BLOCK_ROTATE_BIAS_MM = 150; // ídem para girar un bloque entero (todas sus letras)
@@ -12218,6 +12259,18 @@ const OB_WIDTHS_FINE = [0.75, 1, 1.35, 1.9]; // v102: en la pasada fina, menos f
 const OB_BUDGET_MS = 16000; // v102: la pasada fina solo arranca si se estima dentro de esto
 const OB_HARD_MS = 26000; // v102: y se descarta si llega aquí (el vigilante de runNesting corta a 35 s)
 const OB_FINE_MAX_Q = 300; // v102: con más piezas que esto el giro fino no baja de 30°
+const OB_HOLE_MIN_BAND_MM = 4; // v103: banda mínima de material alrededor de un interior pasante
+const OB_HOLE_MIN_SIZE_MM = 50; // v103: un interior más estrecho no admite ninguna pieza: se trata como macizo
+const OB_BIG_AREA_FRAC = 0.12; // v103: pieza muy grande = su caja ocupa ≥ 12 % de la placa…
+const OB_BIG_FILL_MAX = 0.6; // …y su material no llega al 60 % de esa caja (flecha curva, aro, marco)
+const OB_ZONE_MARGIN_MM = 100; // v103: la zona de relleno abarca la caja de las grandes y este margen
+const OB_FILL_PARTIAL_MIN = 40; // v103: solo un pedido de ≥ 40 piezas puede repartirse entre la zona y su bloque
+const OB_FILL_MIN_PIECES = 3; // v103: y solo si mete al menos estas piezas en la zona
+const OB_WIDTHS_REFORM = [0.75, 1, 1.35]; // v103: franjas al re-empaquetar lo que sobra de un pedido
+const OB_NEAR_MM = 350; // v103: un pedido metido entero en la zona busca sitio a esta distancia de los suyos
+const OB_EVICT_MAX_PIECES = 80; // v103: vaciar la última placa solo si lleva pocas piezas…
+const OB_EVICT_MAX_FRAC = 0.25; // …y poco material (≤ 25 % de la placa)
+const OB_BUDGET_BIG_MS = 11000; // v103: con piezas muy grandes la pasada fina deja sitio al relleno
 /* mm por celda: ~700k celdas por placa (2000×3000 → 2,9 mm). Más fino = más denso y lento. */
 function obResolution(W, H) {
   return Math.min(5, Math.max(1.5, Math.sqrt(W * H / 700000)));
@@ -12266,45 +12319,21 @@ function obDilate(m, k) {
   }
   return { mask: obMaskFromBits(vb, w, h), k };
 }
-/* Rasteriza (relleno par-impar, cada polígono por separado → macizo) sobre centros de celda. */
-function obRasterize(polys, w, h, R) {
-  const bits = new Uint8Array(w * h);
-  for (const poly of polys) {
-    const n = poly.length;
-    if (n < 3) continue;
-    let y0 = Infinity, y1 = -Infinity;
-    for (const p of poly) { if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y; }
-    const j0 = Math.max(0, Math.ceil(y0 / R - 0.5)), j1 = Math.min(h - 1, Math.floor(y1 / R - 0.5));
-    const xs = [];
-    for (let j = j0; j <= j1; j++) {
-      const yc = (j + 0.5) * R;
-      xs.length = 0;
-      for (let a = 0, b = n - 1; a < n; b = a++) {
-        const pa = poly[a], pb = poly[b];
-        if ((pa.y > yc) !== (pb.y > yc)) xs.push(pa.x + (yc - pa.y) * (pb.x - pa.x) / (pb.y - pa.y));
-      }
-      xs.sort((u, v) => u - v);
-      for (let q = 0; q + 1 < xs.length; q += 2) {
-        const i0 = Math.max(0, Math.ceil(xs[q] / R - 0.5)), i1 = Math.min(w - 1, Math.floor(xs[q + 1] / R - 0.5));
-        for (let i = i0; i <= i1; i++) bits[j * w + i] = 1;
-      }
-    }
-  }
-  return bits;
-}
-/* Silueta de nesting de una pieza a 0° en su caja local [0,w]×[0,h]: los anillos cerrados
-   se unen MACIZOS (los huecos de una "O" no se usan: ninguna pieza va dentro de otra) y las
-   líneas abiertas (hendidos) cuentan con su trazo. Inflado `inflate` mm. Devuelve polígonos
-   en mm desplazados `pad` (marco de la máscara). */
-function obInflatedOutline(polylines, w, h, inflate, pad) {
+/* Silueta de nesting de una pieza a 0° en su caja local [0,w]×[0,h]. Inflado `inflate` mm;
+   polígonos en mm desplazados `pad` (marco de la máscara). Las líneas abiertas (hendidos)
+   cuentan con su trazo. Sin `holes` los anillos cerrados se unen MACIZOS (v100). v103: con
+   `holes`, el interior PASANTE de una letra (el hueco de una "O") queda libre y otra pieza
+   puede ir dentro (obHoleRings decide qué anillo es hueco de verdad). */
+function obInflatedOutline(polylines, w, h, inflate, pad, holes) {
   const CL = ClipperLib, S = 100;
-  const closed = [], open = [];
+  const closed = [], open = [], rings = [];
   for (const pl of polylines || []) {
     if (!pl || pl.length < 2) continue;
     const path = pl.map(p => ({ X: Math.round(p.x * S), Y: Math.round(p.y * S) }));
     if (isClosedPts(pl) && pl.length >= 4) {
       if (!CL.Clipper.Orientation(path)) path.reverse();
       closed.push(path);
+      rings.push({ path, capa: pl.capa || "corte", layer: pl.layer || null });
     } else open.push(path);
   }
   const rect = [{ X: 0, Y: 0 }, { X: Math.round(w * S), Y: 0 }, { X: Math.round(w * S), Y: Math.round(h * S) }, { X: 0, Y: Math.round(h * S) }];
@@ -12314,24 +12343,41 @@ function obInflatedOutline(polylines, w, h, inflate, pad) {
      tiene área 0: la unión maciza lo hace desaparecer y la pieza quedaba sin máscara —el
      motor la colocaba ENCIMA de otra—. Se tratan como trazo los anillos cuya anchura media
      (área/perímetro) no llega a 0,5 mm; los demás ya quedan cubiertos por su relleno. */
-  const thin = closed.filter(path => {
+  const isThin = path => {
     let a = 0, per = 0;
     for (let i = 0, n = path.length, j = n - 1; i < n; j = i++) {
       a += path[j].X * path[i].Y - path[i].X * path[j].Y;
       per += Math.hypot(path[i].X - path[j].X, path[i].Y - path[j].Y);
     }
     return Math.abs(a) / 2 < per * 0.5 * S;
-  });
-  const footprint = d => {
-    let solid = closed;
-    if (closed.length) {
+  };
+  const thin = closed.filter(isThin);
+  const union = paths => {
+    const c = new CL.Clipper();
+    c.AddPaths(paths, CL.PolyType.ptSubject, true);
+    const out = new CL.Paths();
+    c.Execute(CL.ClipType.ctUnion, out, CL.PolyFillType.pftNonZero, CL.PolyFillType.pftNonZero);
+    return out;
+  };
+  // material de la pieza (Clipper, ×S): macizo, o con los interiores pasantes vacíos
+  let material = closed.length ? union(closed) : [];
+  let nHoles = 0;
+  if (holes && rings.length > 1) {
+    const H = obHoleRings(rings.filter(r => !isThin(r.path)), open, S);
+    if (H.holes.length) {
+      nHoles = H.holes.length;
       const c = new CL.Clipper();
-      c.AddPaths(closed, CL.PolyType.ptSubject, true);
-      solid = new CL.Paths();
-      c.Execute(CL.ClipType.ctUnion, solid, CL.PolyFillType.pftNonZero, CL.PolyFillType.pftNonZero);
+      c.AddPaths(union(H.solid), CL.PolyType.ptSubject, true);
+      c.AddPaths(union(H.holes), CL.PolyType.ptClip, true);
+      const cut = new CL.Paths();
+      c.Execute(CL.ClipType.ctDifference, cut, CL.PolyFillType.pftNonZero, CL.PolyFillType.pftNonZero);
+      // las islas (una "o" dentro de la "O" del mismo dibujo) vuelven a ser material
+      material = H.islands.length ? union(cut.concat(H.islands)) : cut;
     }
+  }
+  const footprint = d => {
     const co = new CL.ClipperOffset(2, 0.1 * S);
-    if (solid.length) co.AddPaths(solid, CL.JoinType.jtRound, CL.EndType.etClosedPolygon);
+    if (material.length) co.AddPaths(material, CL.JoinType.jtRound, CL.EndType.etClosedPolygon);
     const lines = open.concat(thin);
     if (lines.length) co.AddPaths(lines, CL.JoinType.jtRound, CL.EndType.etOpenRound);
     const out = new CL.Paths();
@@ -12339,7 +12385,117 @@ function obInflatedOutline(polylines, w, h, inflate, pad) {
     return out.length ? out : [rect];
   };
   const toMM = (paths, k) => paths.map(path => path.map(p => ({ x: p.X / S + k, y: p.Y / S + k })));
-  return { polys: toMM(footprint(inflate), pad), solid: toMM(footprint(0.02), 0) };
+  return { polys: toMM(footprint(inflate), pad), solid: toMM(footprint(0.02), 0), holes: nHoles };
+}
+/* v103: ¿qué anillos son interior PASANTE? Uno de CORTE, a profundidad impar dentro de los
+   anillos de corte de SU MISMA capa del archivo, separado de su anillo padre por una banda de
+   material ≥ OB_HOLE_MIN_BAND_MM en todo su contorno y sin ningún otro mecanizado dentro. Así
+   no son hueco: un cajeado ("MET CAJEADO" dentro de "MET CORTE"), un trazo doble (relleno +
+   contorno a 1 mm) ni un taladro o hendido. Devuelve los anillos macizos (todo lo que no es
+   hueco), los huecos y las islas (profundidad par ≥ 2: material dentro de un hueco). */
+function obHoleRings(rings, open, S) {
+  const n = rings.length;
+  const bb = rings.map(r => { let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity; r.path.forEach(p => { if (p.X < a) a = p.X; if (p.X > c) c = p.X; if (p.Y < b) b = p.Y; if (p.Y > d) d = p.Y; }); return { a, b, c, d }; });
+  const area = rings.map(r => Math.abs(ClipperLib.Clipper.Area(r.path)));
+  const fam = r => r.capa === "corte" ? "c|" + (r.layer || "") : null;
+  const inside = (pt, path) => ClipperLib.Clipper.PointInPolygon(pt, path) !== 0;
+  const parent = new Array(n).fill(-1), depth = new Array(n).fill(0);
+  const order = rings.map((r, i) => i).sort((i, j) => area[j] - area[i]);
+  for (const i of order) {
+    const fi = fam(rings[i]);
+    if (!fi) continue;
+    const p0 = rings[i].path[0], pm = rings[i].path[rings[i].path.length >> 1];
+    let best = -1;
+    for (const j of order) {
+      if (j === i || area[j] <= area[i] || fam(rings[j]) !== fi) continue;
+      const B = bb[j], A = bb[i];
+      if (A.a < B.a || A.c > B.c || A.b < B.b || A.d > B.d) continue;
+      if (!inside(p0, rings[j].path) || !inside(pm, rings[j].path)) continue;
+      if (best < 0 || area[j] < area[best]) best = j;
+    }
+    parent[i] = best;
+  }
+  for (const i of order) depth[i] = parent[i] < 0 ? 0 : depth[parent[i]] + 1; // de mayor a menor: el padre ya tiene su profundidad
+  const band = OB_HOLE_MIN_BAND_MM * S;
+  // distancia mínima de los vértices de P a los lados de Q (con descarte por caja)
+  const minDist = (P, Q, lim) => {
+    let m = Infinity;
+    for (const p of P) {
+      for (let k = 0, L = Q.length, j = L - 1; k < L; j = k++) {
+        const a = Q[j], b = Q[k], dx = b.X - a.X, dy = b.Y - a.Y, l2 = dx * dx + dy * dy;
+        let t = l2 ? ((p.X - a.X) * dx + (p.Y - a.Y) * dy) / l2 : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const ex = a.X + t * dx - p.X, ey = a.Y + t * dy - p.Y, d2 = ex * ex + ey * ey;
+        if (d2 < m) { m = d2; if (m < lim * lim) return Math.sqrt(m); }
+      }
+    }
+    return Math.sqrt(m);
+  };
+  const other = rings.filter(r => !fam(r)).map(r => r.path).concat(open);
+  const isHole = new Array(n).fill(false), minSize = OB_HOLE_MIN_SIZE_MM * S;
+  for (let i = 0; i < n; i++) {
+    if (depth[i] % 2 !== 1) continue;
+    if (Math.min(bb[i].c - bb[i].a, bb[i].d - bb[i].b) < minSize) continue; // ahí no cabe nada: macizo
+    const P = rings[i].path, Q = rings[parent[i]].path;
+    if (minDist(P, Q, band) < band || minDist(Q, P, band) < band) continue; // banda fina: trazo doble
+    if (other.some(path => path.some(pt => inside(pt, P)))) continue; // hay algo que mecanizar dentro
+    isHole[i] = true;
+  }
+  const solid = [], holes = [], islands = [];
+  rings.forEach((r, i) => {
+    if (isHole[i]) holes.push(r.path);
+    else {
+      solid.push(r.path);
+      // isla: dentro de un hueco válido (algún antepasado lo es)
+      for (let j = parent[i]; j >= 0; j = parent[j]) if (isHole[j]) { islands.push(r.path); break; }
+    }
+  });
+  return { solid, holes, islands };
+}
+/* Rasteriza sobre centros de celda con relleno NO-CERO de todos los polígonos juntos: los
+   macizos se rellenan y los huecos (orientados al revés, como los deja Clipper) quedan libres. */
+function obRasterize(polys, w, h, R) {
+  const bits = new Uint8Array(w * h);
+  const edges = [];
+  let y0 = Infinity, y1 = -Infinity;
+  for (const poly of polys) {
+    const n = poly.length;
+    if (n < 3) continue;
+    for (let a = 0, b = n - 1; a < n; b = a++) {
+      const pa = poly[b], pb = poly[a];
+      if (pa.y === pb.y) continue;
+      edges.push(pa.y < pb.y ? { ya: pa.y, yb: pb.y, xa: pa.x, xb: pb.x, d: 1 } : { ya: pb.y, yb: pa.y, xa: pb.x, xb: pa.x, d: -1 });
+      if (pa.y < y0) y0 = pa.y; if (pa.y > y1) y1 = pa.y;
+    }
+  }
+  if (!edges.length) return bits;
+  edges.sort((e, f) => e.ya - f.ya);
+  const j0 = Math.max(0, Math.ceil(y0 / R - 0.5)), j1 = Math.min(h - 1, Math.floor(y1 / R - 0.5));
+  const act = [], xs = [];
+  let k = 0;
+  for (let j = j0; j <= j1; j++) {
+    const yc = (j + 0.5) * R;
+    while (k < edges.length && edges[k].ya <= yc) act.push(edges[k++]);
+    xs.length = 0;
+    for (let i = act.length - 1; i >= 0; i--) {
+      const e = act[i];
+      if (e.yb <= yc) { act.splice(i, 1); continue; }
+      if (e.ya > yc) continue;
+      xs.push({ x: e.xa + (yc - e.ya) * (e.xb - e.xa) / (e.yb - e.ya), d: e.d });
+    }
+    xs.sort((u, v) => u.x - v.x);
+    let wnd = 0, xStart = 0;
+    for (const c of xs) {
+      const prev = wnd;
+      wnd += c.d;
+      if (!prev && wnd) xStart = c.x;
+      else if (prev && !wnd) {
+        const i0 = Math.max(0, Math.ceil(xStart / R - 0.5)), i1 = Math.min(w - 1, Math.floor(c.x / R - 0.5));
+        for (let i = i0; i <= i1; i++) bits[j * w + i] = 1;
+      }
+    }
+  }
+  return bits;
 }
 /* Orientaciones de una pieza. Índice a = b·4 + k ↔ ángulo base[b] + 90k, en sentido horario
    (el de rotate() en SVG y en el lienzo). Solo se rasteriza cada ángulo base; k > 0 sale
@@ -12349,7 +12505,7 @@ function obInflatedOutline(polylines, w, h, inflate, pad) {
    y dim[a] = medidas de esa caja: es el hueco que se reporta como placedW×placedH, y
    pieceToPolylinesMM y el lienzo giran el dibujo sobre el centro de ese rectángulo, así que
    motor, lienzo y exportación coinciden al milímetro también con giros finos. */
-function obPieceType(piece, R, gap, base) {
+function obPieceType(piece, R, gap, base, holes) {
   const w = +piece.w || 0, h = +piece.h || 0;
   if (!(w > 0 && h > 0)) return null;
   // aplanado puro JS (rápido, flecha ≤ 0,05 mm); el muestreo por DOM queda de respaldo
@@ -12362,8 +12518,8 @@ function obPieceType(piece, R, gap, base) {
   }
   // gap/2 + media diagonal de celda (cobertura conservadora) + flecha de los arcos del offset
   const d = Math.max(0, gap) / 2 + R * Math.SQRT1_2 + 0.15;
-  const outl = obInflatedOutline(polylines, w, h, d, 0);
-  const T = { piece, w, h, cx: w / 2, cy: h / 2, R, polys: outl.polys, solid: outl.solid, masks: [], off: [], dim: [], ang: [], base: [] };
+  const outl = obInflatedOutline(polylines, w, h, d, 0, holes);
+  const T = { piece, w, h, cx: w / 2, cy: h / 2, R, polys: outl.polys, solid: outl.solid, holes: outl.holes, masks: [], off: [], dim: [], ang: [], base: [] };
   obAddAngles(T, base || [0]);
   return T;
 }
@@ -12465,15 +12621,17 @@ function obGrid(gw, gh) {
     }
     return -1;
   };
-  // primera posición arriba-izquierda (y mínima, luego x mínima) con y ≤ maxY
-  const find = (m, maxY) => {
+  // primera posición arriba-izquierda (y mínima, luego x mínima) con y ≤ maxY; v103: `win`
+  // ({x0, y0, x1, y1} en celdas) limita la búsqueda a una ventana (piezas de un pedido juntas)
+  const find = (m, maxY, win) => {
     if (m.w > gw || m.h > gh) return null;
-    const yEnd = Math.min(gh - m.h, maxY == null ? Infinity : maxY), xMax = gw - m.w;
-    for (let y = 0; y <= yEnd; y++) {
+    let yEnd = Math.min(gh - m.h, maxY == null ? Infinity : maxY), xMax = gw - m.w, y0 = 0, x0 = 0;
+    if (win) { y0 = Math.max(0, win.y0); x0 = Math.max(0, win.x0); yEnd = Math.min(yEnd, win.y1 - m.h); xMax = Math.min(xMax, win.x1 - m.w); }
+    for (let y = y0; y <= yEnd; y++) {
       let ok = true;
       for (let r = 0; r < m.h; r++) if (m.maxLen[r] > rowMax[y + r]) { ok = false; break; }
       if (!ok) continue;
-      let x = 0;
+      let x = x0;
       while (x <= xMax) {
         const nx = test(m, x, y);
         if (nx < 0) return { x, y };
@@ -12496,7 +12654,10 @@ function obGrid(gw, gh) {
       fixRow(yy);
     }
   };
-  return { gw, gh, find, stamp, get free() { return free; } }; // v102: celdas libres (descartar placas llenas)
+  // v103: instantánea y vuelta atrás (un pedido que no entra entero en la zona de relleno)
+  const snapshot = () => ({ run: run.slice(), occ: occ.slice(), rowMax: rowMax.slice(), free });
+  const restore = sn => { run.set(sn.run); occ.set(sn.occ); rowMax.set(sn.rowMax); free = sn.free; };
+  return { gw, gh, find, stamp, snapshot, restore, get free() { return free; } }; // v102: celdas libres (descartar placas llenas)
 }
 /* Mejor colocación de una máscara entre sus giros: la más arriba y, a igualdad, la más a
    la izquierda (abajo-izquierda clásico, con la gravedad hacia el borde superior de la
@@ -12538,13 +12699,13 @@ function obCog(m) {
    criterio de v100: lo más arriba posible) o "cog" = su centro de masas (la orientación que
    mejor se ACOMODA en el hueco: una "A" tumbada en la diagonal de otra). Ninguno gana
    siempre, por eso cada pedido se empaqueta con los dos (obFormBlock/nestByOrderBlocks). */
-function obBestFitPiece(grid, T, idxs, pen, fit) {
+function obBestFitPiece(grid, T, idxs, pen, fit, win) {
   let best = null;
   for (const a of idxs) {
     const m = T.masks[a];
     if (!m) continue;
     const p = pen(a) + (fit === "cog" ? obCog(m) : 0);
-    const pos = grid.find(m, best ? Math.floor(best.score - p) : null);
+    const pos = grid.find(m, best ? Math.floor(best.score - p) : null, win);
     if (!pos) continue;
     const score = pos.y + p;
     if (!best || score < best.score || score === best.score && pos.x < best.x) best = { q: a, x: pos.x, y: pos.y, score };
@@ -12666,6 +12827,25 @@ function obClose(m, k) {
   for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) out[j * w + i] = e2[(j + k) * W + i + k] | m.bits[j * w + i];
   return obMaskFromBits(out, w, h);
 }
+/* v103: rellena los huecos CERRADOS de una máscara (celdas vacías que no se alcanzan desde el
+   borde). La silueta de un bloque normal queda maciza: los interiores de sus letras son para
+   sus propias piezas, no para otro pedido (eso solo junto a piezas muy grandes). */
+function obFillHoles(m) {
+  const w = m.w, h = m.h, bits = new Uint8Array(w * h);
+  for (let j = 0; j < h; j++) { const sp = m.rows[j], o = j * w; for (let s = 0; s < sp.length; s += 2) for (let i = sp[s]; i <= sp[s + 1]; i++) bits[o + i] = 1; }
+  const out = new Uint8Array(w * h).fill(1), st = [];
+  const push = c => { if (!bits[c] && out[c]) { out[c] = 0; st.push(c); } };
+  for (let i = 0; i < w; i++) { push(i); push((h - 1) * w + i); }
+  for (let j = 0; j < h; j++) { push(j * w); push(j * w + w - 1); }
+  while (st.length) {
+    const c = st.pop(), i = c % w;
+    if (i > 0) push(c - 1);
+    if (i < w - 1) push(c + 1);
+    if (c >= w) push(c - w);
+    if (c < (h - 1) * w) push(c + w);
+  }
+  return obMaskFromBits(out, w, h);
+}
 /* Orientación de una pieza con su bloque girado q·90°: mismo ángulo base, k + q. */
 const obRotIdx = (a, q) => a & ~3 | a + q & 3;
 /* Coloca las piezas del bloque girado q·90° (en celdas, exacto): posición de su máscara
@@ -12704,6 +12884,7 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   const R = obResolution(W, H);
   const gw = Math.floor(W / R), gh = Math.floor(H / R);
   const types = [], oversized = [];
+  const holesOn = __NEST_CFG__.fillHoles !== false; // v103: interiores y relleno junto a piezas muy grandes
   const t0 = Date.now();
   let lastYield = t0, deadline = Infinity;
   const breathe = async () => {
@@ -12714,7 +12895,7 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   // ── 1. máscaras por tipo de pieza (0/90/180/270; las finas solo si hay pasada fina) ──
   for (let i = 0; i < srcList.length; i++) {
     if (onProgress) onProgress('masks', i, srcList.length);
-    const T = obPieceType(srcList[i], R, gap, [0]);
+    const T = obPieceType(srcList[i], R, gap, [0], holesOn);
     if (T && !T.masks.some(m => m.w <= gw && m.h <= gh)) {
       oversized.push((srcList[i].label || 'pieza') + ' (' + Math.round(T.w) + '×' + Math.round(T.h) + ' mm)');
       types.push(null);
@@ -12723,6 +12904,12 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   }
   const tMasks = Date.now() - t0;
   const solidA = types.map(T => T ? obSolidArea(T.solid) : 0);
+  /* v103: pieza MUY GRANDE = su caja ocupa ≥ OB_BIG_AREA_FRAC de la placa y su material no
+     llega a OB_BIG_FILL_MAX de esa caja (una flecha curva, un aro, un marco). Solo junto a
+     ellas se permite meter piezas sueltas de otros pedidos (zona de relleno). */
+  const bigArea = OB_BIG_AREA_FRAC * W * H;
+  types.forEach((T, t) => { if (T) T.big = holesOn && T.w * T.h >= bigArea && solidA[t] <= OB_BIG_FILL_MAX * T.w * T.h; });
+  const anyBig = types.some(T => T && T.big);
   // ── 2. instancias por pedido, en orden de primera aparición; de más a menos material ──
   const orderKeys = [], byOrder = new Map();
   srcList.forEach((p, t) => {
@@ -12742,6 +12929,68 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   const placedSolid = r => r.cands[0].placements.reduce((s, pl) => s + solidA[pl.t], 0);
   let doneQ = 0;
   const progress = () => { if (onProgress) onProgress('place', Math.min(totalQ, Math.round(doneQ)), totalQ); };
+  // ── reparto de los bloques en placas ──
+  /* Cada bloque se prueba con sus candidatos y 4 giros; el estampado se dilata
+     OB_ORDER_GAP_MM (entre pedidos queda más aire que entre letras de un pedido). v102:
+     el bloque puede ocupar su RECTÁNGULO (v100) o su SILUETA cerrada (obClose), y en cada
+     placa vale el primer candidato que cabe o el que deja el borde inferior más arriba.
+     v103: la silueta de un bloque normal es maciza (obFillHoles); la de uno con piezas muy
+     grandes conserva sus interiores. */
+  let SIL = false, LOW = false;
+  const masksOf = c => {
+    const k = SIL ? 'ms' : 'mr';
+    if (!c[k]) {
+      let m0 = obRectMask(c.w, c.h);
+      if (SIL) { m0 = obClose(obBlockSilhouette(c, types), kClose); if (!c.big) m0 = obFillHoles(m0); }
+      const ms = [m0];
+      for (let q = 1; q < 4; q++) ms.push(obRotCW(ms[q - 1]));
+      c[k] = ms;
+      c[k + 'd'] = [];
+    }
+    c.masks = c[k];
+    c.dil = c[k + 'd'];
+    return c.masks;
+  };
+  const dilOf = (c, q) => c.dil[q] || (c.dil[q] = obDilate(c.masks[q], kGap));
+  const newSheet = () => ({ grid: obGrid(gw, gh), items: [], usedH: 0, solid: 0 });
+  const tryPlace = (sh, bl) => {
+    let best = null;
+    for (const c of bl.cands) {
+      const ms = masksOf(c);
+      if (ms[0].area > sh.grid.free) continue; // no cabe ni por área
+      const fit = obBestFit(sh.grid, ms, [0, 2, 1, 3], blockBias, LOW && best ? best.bottom : null);
+      if (!fit) continue;
+      if (!LOW) return { c, fit };
+      const bottom = fit.y + ms[fit.q].h;
+      if (!best || bottom < best.bottom) best = { c, fit, bottom };
+    }
+    return best;
+  };
+  // coloca el bloque en la primera placa donde quepa (o en una nueva); null si no cabe ni vacía
+  const placeBlock = (shs, bl, lost) => {
+    let got = null, target = null;
+    for (const sh of shs) { got = tryPlace(sh, bl); if (got) { target = sh; break; } }
+    if (!target) {
+      target = newSheet();
+      got = tryPlace(target, bl);
+      if (!got) { lost.push(bl.key + ': bloque mayor que la placa'); return null; }
+      shs.push(target);
+    }
+    masksOf(got.c);
+    const dil = dilOf(got.c, got.fit.q);
+    target.grid.stamp(dil.mask, got.fit.x - dil.k, got.fit.y - dil.k);
+    const item = { bl, c: got.c, fit: got.fit };
+    target.items.push(item);
+    target.usedH = Math.max(target.usedH, got.fit.y + got.c.masks[got.fit.q].h);
+    target.solid += got.c.placements.reduce((s, pl) => s + solidA[pl.t], 0);
+    return { sh: target, item };
+  };
+  const scoreOf = (shs, lost) => { const last = shs[shs.length - 1]; return [lost.length, shs.length, last ? last.usedH : 0, last ? last.solid : 0]; };
+  const assemble = async list => {
+    const shs = [], lost = [];
+    for (const bl of list) { placeBlock(shs, bl, lost); await breathe(); }
+    return { shs, lost, score: scoreOf(shs, lost) };
+  };
   /* Una pasada: bloques de cada pedido con las orientaciones `idxs` y reparto en placas.
      Cada pedido se empaqueta con los dos criterios (centro de masas y borde superior): si
      cabe entero, sus candidatos se suman; si se reparte por placas, gana el trozo que más
@@ -12762,69 +13011,15 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
           else if (placedSolid(r) > placedSolid(pick)) pick = r;
         }
         if (!pick) { miss.push(key + ': ' + insts.length + ' pieza(s) sin colocar'); break; }
-        blocks.push({ key, cands: pick.cands });
+        const big = pick.cands[0].placements.some(pl => types[pl.t].big);
+        pick.cands.forEach(c => { c.big = big; });
+        blocks.push({ key, cands: pick.cands, big });
         doneQ += pick.cands[0].placements.length * share;
         progress();
         insts = pick.left;
       }
     }
     const tForm = Date.now() - tp0;
-    // ── reparto de los bloques en placas ──
-    /* Cada bloque se prueba con sus candidatos y 4 giros; el estampado se dilata
-       OB_ORDER_GAP_MM (entre pedidos queda más aire que entre letras de un pedido). v102:
-       el bloque puede ocupar su RECTÁNGULO (v100) o su SILUETA cerrada (obClose), y en cada
-       placa vale el primer candidato que cabe o el que deja el borde inferior más arriba.
-       Son baratos, así que se prueban todos con 4 órdenes y gana el que gasta menos placas
-       y, a igualdad, deja más libre (y más arriba) la última: lo que sobra es un retal. */
-    let SIL = false, LOW = false;
-    const masksOf = c => {
-      const k = SIL ? 'ms' : 'mr';
-      if (!c[k]) {
-        const ms = [SIL ? obClose(obBlockSilhouette(c, types), kClose) : obRectMask(c.w, c.h)];
-        for (let q = 1; q < 4; q++) ms.push(obRotCW(ms[q - 1]));
-        c[k] = ms;
-        c[k + 'd'] = [];
-      }
-      c.masks = c[k];
-      c.dil = c[k + 'd'];
-      return c.masks;
-    };
-    const dilOf = (c, q) => c.dil[q] || (c.dil[q] = obDilate(c.masks[q], kGap));
-    const assemble = async list => {
-      const shs = [], lost = [];
-      for (const bl of list) {
-        let got = null, target = null;
-        const tryPlace = sh => {
-          let best = null;
-          for (const c of bl.cands) {
-            const ms = masksOf(c);
-            if (ms[0].area > sh.grid.free) continue; // no cabe ni por área
-            const fit = obBestFit(sh.grid, ms, [0, 2, 1, 3], blockBias, LOW && best ? best.bottom : null);
-            if (!fit) continue;
-            if (!LOW) return { c, fit };
-            const bottom = fit.y + ms[fit.q].h;
-            if (!best || bottom < best.bottom) best = { c, fit, bottom };
-          }
-          return best;
-        };
-        for (const sh of shs) { got = tryPlace(sh); if (got) { target = sh; break; } }
-        if (!target) {
-          target = { grid: obGrid(gw, gh), items: [], usedH: 0, solid: 0 };
-          got = tryPlace(target);
-          if (!got) { lost.push(bl.key + ': bloque mayor que la placa'); continue; }
-          shs.push(target);
-        }
-        masksOf(got.c);
-        const dil = dilOf(got.c, got.fit.q);
-        target.grid.stamp(dil.mask, got.fit.x - dil.k, got.fit.y - dil.k);
-        target.items.push({ bl, c: got.c, fit: got.fit });
-        target.usedH = Math.max(target.usedH, got.fit.y + got.c.masks[got.fit.q].h);
-        target.solid += got.c.placements.reduce((s, pl) => s + solidA[pl.t], 0);
-        await breathe();
-      }
-      const last = shs[shs.length - 1];
-      return { shs, lost, score: [lost.length, shs.length, last ? last.usedH : 0, last ? last.solid : 0] };
-    };
     const bArea = bl => bl.cands[0].w * bl.cands[0].h;
     const orders = [
       blocks.slice().sort((a, b) => bArea(b) - bArea(a)),
@@ -12838,12 +13033,251 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
       for (const list of orders) {
         const asm = await assemble(list);
         asm.mode = (sil ? 'silueta' : 'rectángulo') + (low ? '+abajo' : '');
+        asm.sil = sil; asm.low = low; asm.list = list;
         if (!best || obScoreLess(asm.score, best.score)) best = asm;
       }
     }
     best.miss = miss;
+    best.idxs = idxs;
+    best.factors = factors;
     best.t = [tForm, Date.now() - tp0 - tForm];
     return best;
+  };
+  /* ── v103 · ZONA DE RELLENO JUNTO A PIEZAS MUY GRANDES ──
+     Al colocar un bloque con piezas muy grandes, la caja de esas piezas (+ OB_ZONE_MARGIN_MM)
+     pasa a ser zona de relleno: ahí entran, SUELTAS y sin pasillo, piezas de los pedidos que
+     faltan por colocar —en sus huecos, entre ellas y en sus interiores—. Primero pedidos
+     ENTEROS (un pedido pequeño se mezcla con las grandes en vez de abrir otra placa) y luego,
+     en lo que quede, parte de un pedido GRANDE (≥ OB_FILL_PARTIAL_MIN piezas): el resto de ese
+     pedido se vuelve a empaquetar como bloque. Fuera de la zona todo sigue agrupado. */
+  const fillZone = async (sh, item, queue, idxs) => {
+    const { c, fit } = item;
+    let zx0 = Infinity, zy0 = Infinity, zx1 = -Infinity, zy1 = -Infinity;
+    for (const pl0 of c.placements) {
+      if (!types[pl0.t].big) continue;
+      const pl = obRotatePlacement(pl0, types, c.w, c.h, fit.q), m = types[pl.t].masks[pl.q];
+      const x = fit.x + pl.gx, y = fit.y + pl.gy;
+      if (x < zx0) zx0 = x; if (y < zy0) zy0 = y; if (x + m.w > zx1) zx1 = x + m.w; if (y + m.h > zy1) zy1 = y + m.h;
+    }
+    if (!(zx1 > zx0)) return 0;
+    const mg = Math.round(OB_ZONE_MARGIN_MM / R);
+    zx0 = Math.max(0, zx0 - mg); zy0 = Math.max(0, zy0 - mg); zx1 = Math.min(gw, zx1 + mg); zy1 = Math.min(gh, zy1 + mg);
+    // rejilla FINA de la placa: piezas reales (no siluetas); fuera de la zona, ocupado
+    const G = obGrid(gw, gh);
+    const rect = (x, y, w, h) => { if (w > 0 && h > 0) G.stamp(obRectMask(w, h), x, y); };
+    rect(0, 0, gw, zy0); rect(0, zy1, gw, gh - zy1); rect(0, zy0, zx0, zy1 - zy0); rect(zx1, zy0, gw - zx1, zy1 - zy0);
+    for (const it of sh.items) {
+      for (const pl0 of it.c.placements) {
+        const pl = obRotatePlacement(pl0, types, it.c.w, it.c.h, it.fit.q), m = types[pl.t].masks[pl.q];
+        const x = it.fit.x + pl.gx, y = it.fit.y + pl.gy;
+        if (it.bl.big || it.loose) G.stamp(m, x, y); // con las grandes (y lo ya mezclado) basta el hueco entre piezas
+        else { const dm = obDilate(m, kGap); G.stamp(dm.mask, x - dm.k, y - dm.k); } // otro bloque: su pasillo
+      }
+    }
+    const instsOf = pb => pb.left || pb.cands[0].placements.map(pl => pl.inst);
+    let moved = 0;
+    const commit = (pb, placed) => {
+      sh.items.push({ bl: { key: pb.key, big: false }, c: { placements: placed, w: gw, h: gh }, fit: { x: 0, y: 0, q: 0 }, loose: true });
+      for (const pl of placed) {
+        const m = types[pl.t].masks[pl.q], dm = obDilate(m, kGap);
+        sh.grid.stamp(dm.mask, pl.gx - dm.k, pl.gy - dm.k);
+        sh.usedH = Math.max(sh.usedH, pl.gy + m.h);
+        sh.solid += solidA[pl.t];
+      }
+      moved += placed.length;
+    };
+    const tryFill = async (pb, partial) => {
+      const insts = instsOf(pb);
+      let need = 0;
+      for (const inst of insts) need += types[inst.t].masks[0].area;
+      if (!partial && need > G.free) return false;
+      /* Pedido entero: primero COMO BLOQUE (su maqueta compacta, en la silueta maciza) dentro
+         de los huecos de las grandes; así queda junto. Si no cabe así, pieza a pieza. */
+      if (!partial && pb.cands) {
+        for (const c of pb.cands) {
+          if (!c.ms) { const prev = SIL; SIL = true; masksOf(c); SIL = prev; masksOf(c); }
+          const fit = obBestFit(G, c.ms, [0, 2, 1, 3], blockBias);
+          if (!fit) continue;
+          const placed = c.placements.map(pl0 => {
+            const pl = obRotatePlacement(pl0, types, c.w, c.h, fit.q);
+            const m = types[pl.t].masks[pl.q];
+            G.stamp(m, fit.x + pl.gx, fit.y + pl.gy);
+            return { inst: pl.inst, t: pl.t, q: pl.q, gx: fit.x + pl.gx, gy: fit.y + pl.gy };
+          });
+          commit(pb, placed);
+          return true;
+        }
+      }
+      const snap = G.snapshot();
+      const placed = [], rest = [], failed = new Set();
+      let sx = 0, sy = 0, sw = 0; // centro de lo ya metido de este pedido
+      const near = Math.round(OB_NEAR_MM / R);
+      for (const inst of insts) {
+        const T = types[inst.t];
+        // la zona solo se llena: si una pieza igual (misma letra y medida) no entró, esta tampoco
+        const sig = T.w.toFixed(1) + 'x' + T.h.toFixed(1) + ':' + Math.round(solidA[inst.t]);
+        let best = null;
+        if (!failed.has(sig) && T.masks[0].area <= G.free) {
+          // pedido entero: cada pieza busca primero junto a las suyas (ventanas crecientes)
+          if (!partial && sw) {
+            const cx = sx / sw, cy = sy / sw;
+            for (const k of [1, 2.5]) {
+              const r = near * k;
+              best = obBestFitPiece(G, T, idxs, pen, 'cog', { x0: Math.floor(cx - r), y0: Math.floor(cy - r), x1: Math.ceil(cx + r), y1: Math.ceil(cy + r) });
+              if (best) break;
+            }
+          }
+          if (!best) best = obBestFitPiece(G, T, idxs, pen, 'cog');
+        }
+        await breathe();
+        if (!best) { failed.add(sig); rest.push(inst); if (!partial) break; continue; }
+        const m = T.masks[best.q];
+        G.stamp(m, best.x, best.y);
+        placed.push({ inst, t: inst.t, q: best.q, gx: best.x, gy: best.y });
+        sx += (best.x + m.w / 2) * m.area; sy += (best.y + m.h / 2) * m.area; sw += m.area;
+      }
+      const all = placed.length === insts.length;
+      if (!all && !(partial && placed.length >= OB_FILL_MIN_PIECES)) { G.restore(snap); return false; }
+      commit(pb, placed);
+      if (all) return true;
+      pb.left = rest; // el resto del pedido se re-empaqueta cuando le toque
+      pb.cands = null;
+      return false;
+    };
+    // 1) pedidos pequeños, ENTEROS; 2) en lo que quede, los grandes (enteros si caben o en parte)
+    const grande = pb => byOrder.get(pb.key).length >= OB_FILL_PARTIAL_MIN;
+    for (let qi = 0; qi < queue.length; qi++) {
+      const pb = queue[qi];
+      if (pb.big || pb.left || grande(pb)) continue;
+      if (await tryFill(pb, false)) { queue.splice(qi, 1); qi--; }
+    }
+    for (let qi = 0; qi < queue.length; qi++) {
+      const pb = queue[qi];
+      if (pb.big || !grande(pb)) continue;
+      if (await tryFill(pb, true)) { queue.splice(qi, 1); qi--; }
+    }
+    return moved;
+  };
+  /* Reparto con relleno: primero los bloques con piezas muy grandes, cada uno rellenando su
+     zona con lo pendiente; lo que sobra de los pedidos grandes se re-empaqueta, y el resto se
+     reparte sobre esas placas ya rellenas con todas las estrategias (como en pass). */
+  const assembleZ = async W0 => {
+    SIL = W0.sil; LOW = W0.low;
+    const shs = [], lost = [];
+    const queue = W0.list.filter(b => !b.big).map(bl => ({ key: bl.key, cands: bl.cands, big: false }));
+    let moved = 0;
+    const tf0 = Date.now();
+    for (const bl of W0.list.filter(b => b.big)) {
+      const got = placeBlock(shs, bl, lost);
+      if (got) moved += await fillZone(got.sh, got.item, queue, W0.idxs);
+      await breathe();
+    }
+    if (!moved) return null;
+    const tFill = Date.now() - tf0;
+    // lo que quedó de un pedido grande tras rellenar se vuelve a empaquetar (uno o varios bloques)
+    const rest = [];
+    for (const pb of queue) {
+      if (!pb.left) { rest.push(pb); continue; }
+      let left = pb.left, guard = 0;
+      while (left.length && guard++ < 64) {
+        const r = await obFormBlock(left, types, gw, gh, left.length > 150, pen, W0.idxs, 'cog', OB_WIDTHS_REFORM, breathe);
+        if (!r.cands.length) { lost.push(pb.key + ': ' + left.length + ' pieza(s) sin colocar'); break; }
+        r.cands.forEach(c => { c.big = false; });
+        rest.push({ key: pb.key, cands: r.cands, big: false });
+        left = r.left;
+      }
+    }
+    const tReform = Date.now() - tf0 - tFill;
+    // el resto, con todas las estrategias, sobre las placas ya rellenas
+    const pre = shs.map(sh => ({ grid: sh.grid, snap: sh.grid.snapshot(), items: sh.items.slice(), usedH: sh.usedH, solid: sh.solid }));
+    const bArea = bl => bl.cands[0].w * bl.cands[0].h;
+    const orders = [
+      rest.slice().sort((a, b) => bArea(b) - bArea(a)),
+      rest.slice().sort((a, b) => Math.max(b.cands[0].w, b.cands[0].h) - Math.max(a.cands[0].w, a.cands[0].h)),
+      rest.slice().sort((a, b) => b.cands[0].h - a.cands[0].h || bArea(b) - bArea(a)),
+      rest.slice().sort((a, b) => b.cands[0].w - a.cands[0].w || bArea(b) - bArea(a))
+    ];
+    let best = null;
+    for (const [sil, low] of OB_ASSEMBLY) {
+      for (const list of orders) {
+        SIL = sil; LOW = low;
+        const sheets = pre.map(p => { p.grid.restore(p.snap); return { grid: p.grid, items: p.items.slice(), usedH: p.usedH, solid: p.solid }; });
+        const lost2 = lost.slice();
+        for (const bl of list) { placeBlock(sheets, bl, lost2); await breathe(); }
+        const asm = { shs: sheets, lost: lost2, score: scoreOf(sheets, lost2), moved, mode: W0.mode + '+relleno' };
+        if (!best || obScoreLess(asm.score, best.score)) best = asm;
+      }
+    }
+    best.tz = [tFill, tReform, Date.now() - tf0 - tFill - tReform];
+    return best;
+  };
+  /* v103 · ¿SE PUEDE VACIAR LA ÚLTIMA PLACA? Sus pedidos se intentan meter en los huecos de
+     las anteriores pieza a pieza pero JUNTOS (cada pieza a ≤ 2,5·OB_NEAR_MM de las suyas) y con
+     su pasillo con los demás pedidos (salvo junto a piezas muy grandes). Solo se aplica si la
+     última placa queda vacía del todo: si no, no se toca nada. */
+  const fineGrid = sh => {
+    const G = obGrid(gw, gh);
+    for (const it of sh.items) {
+      for (const pl0 of it.c.placements) {
+        const pl = obRotatePlacement(pl0, types, it.c.w, it.c.h, it.fit.q), m = types[pl.t].masks[pl.q];
+        const x = it.fit.x + pl.gx, y = it.fit.y + pl.gy;
+        if (it.bl.big) G.stamp(m, x, y);
+        else { const dm = obDilate(m, kGap); G.stamp(dm.mask, x - dm.k, y - dm.k); }
+      }
+    }
+    return G;
+  };
+  const placeGroup = async (G, insts, idxs) => {
+    const placed = [], near = Math.round(OB_NEAR_MM / R);
+    let sx = 0, sy = 0, sw = 0;
+    for (const inst of insts) {
+      const T = types[inst.t];
+      let best = null;
+      if (!sw) best = obBestFitPiece(G, T, idxs, pen, 'cog');
+      else {
+        const cx = sx / sw, cy = sy / sw;
+        for (const k of [1, 2.5]) {
+          const r = near * k;
+          best = obBestFitPiece(G, T, idxs, pen, 'cog', { x0: Math.floor(cx - r), y0: Math.floor(cy - r), x1: Math.ceil(cx + r), y1: Math.ceil(cy + r) });
+          if (best) break;
+        }
+      }
+      await breathe();
+      if (!best) return null;
+      const m = T.masks[best.q];
+      G.stamp(m, best.x, best.y);
+      placed.push({ inst, t: inst.t, q: best.q, gx: best.x, gy: best.y });
+      sx += (best.x + m.w / 2) * m.area; sy += (best.y + m.h / 2) * m.area; sw += m.area;
+    }
+    // y el pasillo con lo que venga después en esa placa
+    for (const pl of placed) { const dm = obDilate(types[pl.t].masks[pl.q], kGap); G.stamp(dm.mask, pl.gx - dm.k, pl.gy - dm.k); }
+    return placed;
+  };
+  const evictLast = async (asm, idxs) => {
+    if (asm.shs.length < 2) return false;
+    const last = asm.shs[asm.shs.length - 1];
+    let need = 0, n = 0;
+    for (const it of last.items) for (const pl of it.c.placements) { need += types[pl.t].masks[0].area; n++; }
+    // solo merece la pena con una última placa casi vacía (y es lo que se puede rellenar)
+    if (n > OB_EVICT_MAX_PIECES || need > OB_EVICT_MAX_FRAC * gw * gh) return false;
+    const fine = asm.shs.slice(0, -1).map(sh => ({ sh, G: fineGrid(sh) }));
+    if (need > fine.reduce((s, f) => s + f.G.free, 0)) return false;
+    const plan = [];
+    for (const it of last.items) {
+      const insts = it.c.placements.map(pl => pl.inst).sort((a, b) => solidA[b.t] - solidA[a.t]);
+      let done = false;
+      for (const f of fine) {
+        const snap = f.G.snapshot();
+        const placed = await placeGroup(f.G, insts, idxs);
+        if (placed) { plan.push({ f, it, placed }); done = true; break; }
+        f.G.restore(snap);
+      }
+      if (!done) return false;
+    }
+    for (const { f, it, placed } of plan) f.sh.items.push({ bl: { key: it.bl.key, big: false }, c: { placements: placed, w: gw, h: gh }, fit: { x: 0, y: 0, q: 0 }, loose: true });
+    asm.shs.pop();
+    asm.score = scoreOf(asm.shs, asm.lost);
+    return true;
   };
   // ── 3. pasada A: 0/90/180/270 (resultado seguro y medida de lo rápida que es la máquina) ──
   const A = await pass([0, 2, 1, 3], OB_WIDTHS, 0.5);
@@ -12860,8 +13294,10 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   };
   // muchas piezas (letras pequeñas): 30° da lo mismo que 15° en la mitad de tiempo
   const minStep = Math.max(want, totalQ > OB_FINE_MAX_Q ? 30 : 0);
-  const step = want < 90 ? [minStep, 30, 45].filter((s, i, a) => s >= minStep && a.indexOf(s) === i).find(s => tA + estB(s) <= OB_BUDGET_MS) : null;
-  const diag = { tA, tMasks, tAparts: A.t, est: want < 90 ? Math.round(estB(want)) : 0, step: step || null, a: [A.miss.length].concat(A.score) };
+  const budget = anyBig ? OB_BUDGET_BIG_MS : OB_BUDGET_MS;
+  const step = want < 90 ? [minStep, 30, 45].filter((s, i, a) => s >= minStep && a.indexOf(s) === i).find(s => tA + estB(s) <= budget) : null;
+  const diag = { tA, tMasks, tAparts: A.t, est: want < 90 ? Math.round(estB(want)) : 0, step: step || null, a: [A.miss.length].concat(A.score), big: anyBig };
+  const better = (X, Y) => obScoreLess([X.miss.length].concat(X.score), [Y.miss.length].concat(Y.score));
   if (step) {
     deadline = t0 + OB_HARD_MS;
     try {
@@ -12874,7 +13310,7 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
       diag.b = [B.miss.length].concat(B.score);
       diag.tB = Date.now() - t0 - tA;
       diag.tBparts = B.t;
-      if (obScoreLess([B.miss.length].concat(B.score), [A.miss.length].concat(A.score))) winner = B;
+      if (better(B, A)) winner = B;
     } catch (e) {
       if (e && e.message === '__NEST_CANCELLED__') throw e;
       // tiempo agotado (o fallo) en la pasada fina: vale la pasada A
@@ -12882,7 +13318,44 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
       console.warn('[Rotula] pasada de giros finos descartada:', e && e.message);
     } finally { deadline = Infinity; }
   }
-  // ── 5. volcado a placas (y red final con la geometría real) ──
+  // ── 5. v103: relleno junto a piezas muy grandes (sobre el reparto ganador; mismo tope de tiempo) ──
+  const beforeZ = winner;
+  if (anyBig && Date.now() - t0 < OB_HARD_MS) {
+    deadline = t0 + OB_HARD_MS;
+    try {
+      const W0 = winner;
+      const Z = await assembleZ(W0);
+      if (Z) {
+        Z.miss = W0.miss; Z.step = W0.step; Z.idxs = W0.idxs;
+        diag.z = [Z.moved].concat(Z.score, Z.tz);
+        /* Gana el relleno si gasta menos placas o, con las mismas, si la última queda igual de
+           libre (±5 % de alto): es justo aprovechar el sitio entre las grandes que se pide. */
+        const zs = [Z.miss.length].concat(Z.score), ws = [W0.miss.length].concat(W0.score);
+        const tie = zs[0] === ws[0] && zs[1] === ws[1] && zs[2] === ws[2] && zs[3] <= ws[3] + 0.05 * gh;
+        if (better(Z, W0) || tie) winner = Z;
+      }
+    } catch (e) {
+      if (e && e.message === '__NEST_CANCELLED__') throw e;
+      diag.errZ = e && e.message;
+      console.warn('[Rotula] relleno junto a piezas grandes descartado:', e && e.message);
+    } finally { deadline = Infinity; }
+  }
+  // ── 6. v103: vaciar la última placa si sus pedidos caben juntos en los huecos de las demás ──
+  if (holesOn && winner.shs.length > 1 && Date.now() - t0 < OB_HARD_MS - 3000) {
+    deadline = t0 + OB_HARD_MS;
+    try {
+      const before = winner;
+      // se trabaja sobre una copia de las listas de piezas: si falla a medias, nada cambia
+      const copy = { ...winner, shs: winner.shs.map(sh => ({ ...sh, items: sh.items.slice() })) };
+      let n = 0;
+      while (n < 3 && await evictLast(copy, winner.idxs || [0, 2, 1, 3])) n++;
+      if (n) { winner = copy; winner.mode = (before.mode || '') + '+vaciado'; diag.evicted = n; }
+    } catch (e) {
+      if (e && e.message === '__NEST_CANCELLED__') throw e;
+      diag.errE = e && e.message;
+    } finally { deadline = Infinity; }
+  }
+  // ── 7. volcado a placas (y red final con la geometría real) ──
   const dump = async asm => {
     const sheets = [];
     for (const sh of asm.shs) {
@@ -12907,9 +13380,10 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
           });
           target.check.push({ label: src.label, solid });
         }
-        target.blocks.push({ key: bl.key, x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+        target.blocks.push({ key: bl.key, x: x0, y: y0, w: x1 - x0, h: y1 - y0, loose: !!c.loose });
       }
-      // red final con la geometría real: un solape aquí sería un fallo del motor → nesting normal
+      // red final con la geometría real (interiores incluidos): un solape aquí sería un fallo
+      // del motor → nesting normal
       const clash = obFindOverlap(target.check);
       if (clash) throw new Error('solape entre ' + clash.join(' y '));
       delete target.check;
@@ -12922,12 +13396,18 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   try {
     sheets = await dump(winner);
   } catch (e) {
-    if (winner === A || e && e.message === '__NEST_CANCELLED__') throw e;
-    // la pasada fina no supera la red final: vale la A (0/90/180/270, la de siempre)
-    console.warn('[Rotula] giros finos descartados en la red final:', e && e.message);
+    if (e && e.message === '__NEST_CANCELLED__') throw e;
+    // el relleno o la pasada fina no superan la red final: se vuelve a lo anterior
+    const fallback = winner !== beforeZ ? beforeZ : winner !== A ? A : null;
+    if (!fallback) throw e;
+    console.warn('[Rotula] reparto descartado en la red final:', e && e.message);
     diag.err = e && e.message;
-    winner = A;
-    sheets = await dump(A);
+    winner = fallback;
+    try { sheets = await dump(winner); } catch (e2) {
+      if (winner === A || e2 && e2.message === '__NEST_CANCELLED__') throw e2;
+      winner = A;
+      sheets = await dump(A);
+    }
   }
   oversized.push(...winner.miss, ...winner.lost);
   const out = sheets.map(sh => {
@@ -12941,6 +13421,7 @@ async function nestByOrderBlocks(srcList, W, H, gap, onProgress) {
   out._res = R;
   out._rotStep = winner.step;
   out._mode = winner.mode;
+  out._mixed = winner.moved || 0; // v103: piezas metidas sueltas junto a piezas muy grandes
   out._ms = Date.now() - t0;
   out._diag = diag; // pasadas: tiempo de A, paso fino probado y puntuación de cada una
   if (oversized.length) out._oversized = oversized;
@@ -18074,6 +18555,11 @@ function App() {
   const [gapMM, setGapMM] = useState(__NEST_CFG__.gap);
   const [nfpEngine, setNfpEngine] = useState(__NEST_CFG__.nfp);
   const [groupOrders, setGroupOrders] = useState(__NEST_CFG__.groupOrders !== false); // v82
+  const [fillHoles, setFillHoles] = useState(() => {
+    // v103: interiores y relleno junto a piezas muy grandes, recordado en este navegador
+    __NEST_CFG__.fillHoles = LS.get("np-fillholes", true) !== false;
+    return __NEST_CFG__.fillHoles;
+  });
   const [rotStep, setRotStep] = useState(() => {
     // v102: paso de giro recordado en este navegador
     const v = +LS.get("np-rotstep", __NEST_CFG__.rotStep);
@@ -19096,7 +19582,7 @@ function App() {
     style: {
       color: "#E6007E"
     }
-  }, "v102"))))), tab === "nesting" && React.createElement("div", {
+  }, "v103"))))), tab === "nesting" && React.createElement("div", {
     style: {
       padding: 16,
       display: "flex",
@@ -19511,7 +19997,29 @@ function App() {
   }, OB_ROT_STEPS.map(v => React.createElement("option", {
     key: v,
     value: v
-  }, v + "\xB0"))))), React.createElement("button", {
+  }, v + "\xB0")))), React.createElement("label", {
+    title: "Aprovecha el interior de las letras (O, D, A, marcos) para piezas de su pedido y, junto a piezas MUY grandes (flechas, aros, marcos enormes), mete piezas sueltas de otros pedidos en sus huecos. Desact\xEDvalo para que cada pedido quede siempre en su bloque cerrado.",
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 5,
+      fontSize: 12,
+      color: groupOrders ? "#555" : "#bbb",
+      fontWeight: 600,
+      cursor: "pointer"
+    }
+  }, React.createElement("input", {
+    type: "checkbox",
+    "data-testid": "fill-holes",
+    checked: fillHoles,
+    disabled: !groupOrders,
+    onChange: e => {
+      setFillHoles(e.target.checked);
+      __NEST_CFG__.fillHoles = e.target.checked; // v103
+      LS.set("np-fillholes", e.target.checked);
+      setNestResult(null);
+    }
+  }), "Rellenar huecos")), React.createElement("button", {
     onClick: runNesting,
     disabled: nesting,
     className: "btn-glow",

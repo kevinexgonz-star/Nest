@@ -86,6 +86,29 @@ Lo que sale del nesting (lienzo, DXF, SVG y PDF) queda maquetado como se hace a 
   no comparten placa.
 - La **cantidad** de un pedido multiplica TODAS sus piezas (antes solo la primera).
 
+## Piezas muy grandes e interiores (v103)
+
+Un lote de PVC 3 con dos flechas enormes (BFYACFTOX) dejaba una placa casi vacía para ellas
+(48 % + 31 %); con v103 las letras de los demás pedidos se anidan entre las flechas y en su
+curva (54 % + 25 %, con la mitad inferior de la última placa libre).
+
+- **Interiores pasantes**: el hueco de una «O», una «D» o un marco queda libre para piezas de
+  su mismo pedido. Solo cuenta como interior un anillo de corte de la misma capa que el que lo
+  contiene, con una banda de material ≥ 4 mm y al menos 50 mm de hueco: un cajeado (capa
+  «MET CAJEADO» o similar), un trazo doble o un taladro nunca.
+- **Zona de relleno junto a piezas muy grandes** (caja ≥ 12 % de la placa y material < 60 % de
+  esa caja: flechas curvas, aros, marcos enormes): ahí entran, sueltas y sin pasillo, piezas de
+  otros pedidos. Primero pedidos pequeños **enteros** —como bloque compacto si cabe, si no
+  juntos (cada pieza cerca de las suyas)— y luego, en lo que quede, parte de un pedido grande
+  (≥ 40 piezas); el resto de ese pedido se re-empaqueta como bloque. Fuera de la zona todo
+  sigue agrupado como en v102.
+- **Última placa casi vacía**: si sus pedidos caben juntos (y con su pasillo) en los huecos de
+  las demás placas, se vacía.
+- **SVG con capas**: una capa «… CAJEADO» o «AGUJEROS» manda sobre el color del trazo; antes un
+  cajeado con trazo negro entraba como corte y salía en la capa de corte del DXF.
+- Interruptor **Rellenar huecos** junto a «Giro» (apagado = comportamiento de v102). Los
+  colores de pedido se reparten para que los primeros sean bien distintos.
+
 ## Aprovechar el material sin dejar de agrupar (v102)
 
 Un lote real de Opal 8 (8 pedidos, 68 letras con cajeado) que VCarve saca en 2 placas gastaba 3
